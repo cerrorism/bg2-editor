@@ -574,18 +574,6 @@ impl CatalogKind {
             CatalogKind::Spell => gd.spell_name(resref),
         }
     }
-    fn catalog(&self, gd: &GameData) -> crate::gamedata::Catalog {
-        match self {
-            CatalogKind::Item => gd.item_catalog(),
-            CatalogKind::Spell => gd.spell_catalog(),
-        }
-    }
-    fn window_title(&self) -> &'static str {
-        match self {
-            CatalogKind::Item => "Pick an Item",
-            CatalogKind::Spell => "Pick a Spell",
-        }
-    }
 }
 
 /// Edits a ResRef as an up-to-8-character text field. When `gd` is
@@ -620,15 +608,13 @@ fn edit_resref(ui: &mut Ui, id: egui::Id, resref: &mut ResRef, dirty: &mut bool,
 }
 
 /// Renders a button that opens a searchable popup window listing every
-/// entry in `kind`'s catalog (filtered live by a search box); calls
-/// `on_select` once when the user clicks a result. Open/closed state and
-/// the search query persist in egui's own per-`id` memory, so this needs
+/// entry in `kind`'s catalog; calls `on_select` once when the user picks
+/// a result. Open/closed state, the search query, and (for items) the
+/// category filter persist in egui's own per-`id` memory, so this needs
 /// no state in `Bg2EditorApp` and multiple pickers on screen at once
 /// (one per row) don't interfere with each other.
-fn picker_button(ui: &mut Ui, id: egui::Id, button_label: &str, gd: &GameData, kind: CatalogKind, mut on_select: impl FnMut(ResRef)) {
+fn picker_button(ui: &mut Ui, id: egui::Id, button_label: &str, gd: &GameData, kind: CatalogKind, on_select: impl FnMut(ResRef)) {
     let open_id = id.with("picker_open");
-    let query_id = id.with("picker_query");
-
     if ui.button(button_label).clicked() {
         ui.memory_mut(|m| m.data.insert_temp(open_id, true));
     }
@@ -636,43 +622,140 @@ fn picker_button(ui: &mut Ui, id: egui::Id, button_label: &str, gd: &GameData, k
     if !is_open {
         return;
     }
+    let still_open = match kind {
+        CatalogKind::Item => item_picker_window(ui, id, gd, on_select),
+        CatalogKind::Spell => spell_picker_window(ui, id, gd, on_select),
+    };
+    ui.memory_mut(|m| m.data.insert_temp(open_id, still_open));
+}
 
+/// Simple name/code search list (spells have no comparable per-entry
+/// stats worth a table). Returns whether the window should stay open.
+fn spell_picker_window(ui: &mut Ui, id: egui::Id, gd: &GameData, mut on_select: impl FnMut(ResRef)) -> bool {
+    let query_id = id.with("picker_query");
     let mut query: String = ui.memory(|m| m.data.get_temp::<String>(query_id)).unwrap_or_default();
     let mut still_open = true;
     let mut picked: Option<ResRef> = None;
-    egui::Window::new(kind.window_title())
-        .id(id.with("picker_window"))
-        .open(&mut still_open)
-        .default_width(420.0)
-        .default_height(480.0)
-        .show(ui.ctx(), |ui| {
-            ui.add(egui::TextEdit::singleline(&mut query).hint_text("Search by name or code…"));
-            ui.separator();
-            let catalog = kind.catalog(gd);
-            let q = query.to_ascii_lowercase();
-            ScrollArea::vertical().show(ui, |ui| {
-                let mut shown = 0usize;
-                for (rr, name) in catalog.iter() {
-                    if !q.is_empty() && !name.to_ascii_lowercase().contains(&q) && !rr.to_ascii_lowercase().contains(&q) {
-                        continue;
-                    }
-                    if ui.selectable_label(false, format!("{name}  [{rr}]")).clicked() {
-                        picked = Some(ResRef::from_str(rr));
-                    }
-                    shown += 1;
-                    if shown >= 300 {
-                        ui.weak("(more than 300 matches — keep typing to narrow it down)");
-                        break;
-                    }
+    egui::Window::new("Pick a Spell").id(id.with("picker_window")).open(&mut still_open).default_width(420.0).default_height(480.0).show(ui.ctx(), |ui| {
+        ui.add(egui::TextEdit::singleline(&mut query).hint_text("Search by name or code…"));
+        ui.separator();
+        let catalog = gd.spell_catalog();
+        let q = query.to_ascii_lowercase();
+        ScrollArea::vertical().show(ui, |ui| {
+            let mut shown = 0usize;
+            for (rr, name) in catalog.iter() {
+                if !q.is_empty() && !name.to_ascii_lowercase().contains(&q) && !rr.to_ascii_lowercase().contains(&q) {
+                    continue;
                 }
-            });
+                if ui.selectable_label(false, format!("{name}  [{rr}]")).clicked() {
+                    picked = Some(ResRef::from_str(rr));
+                }
+                shown += 1;
+                if shown >= 300 {
+                    ui.weak("(more than 300 matches — keep typing to narrow it down)");
+                    break;
+                }
+            }
         });
+    });
     ui.memory_mut(|m| m.data.insert_temp(query_id, query));
     if let Some(rr) = picked {
         on_select(rr);
         still_open = false;
     }
-    ui.memory_mut(|m| m.data.insert_temp(open_id, still_open));
+    still_open
+}
+
+/// Item picker: category filter + name/code search + a stat table
+/// (damage, damage type, speed factor, range, STR requirement,
+/// two-handed, weapon proficiency) so weapons can actually be compared
+/// rather than picked blind by name. Returns whether the window should
+/// stay open.
+fn item_picker_window(ui: &mut Ui, id: egui::Id, gd: &GameData, mut on_select: impl FnMut(ResRef)) -> bool {
+    let query_id = id.with("picker_query");
+    let category_id = id.with("picker_category");
+    let mut query: String = ui.memory(|m| m.data.get_temp::<String>(query_id)).unwrap_or_default();
+    let mut category: String = ui.memory(|m| m.data.get_temp::<String>(category_id)).unwrap_or_else(|| "All".to_owned());
+    let mut still_open = true;
+    let mut picked: Option<ResRef> = None;
+
+    egui::Window::new("Pick an Item").id(id.with("picker_window")).open(&mut still_open).default_width(760.0).default_height(560.0).show(ui.ctx(), |ui| {
+        let catalog = gd.item_catalog_full();
+
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut query).hint_text("Search by name or code…").desired_width(220.0));
+            ui.label("Category:");
+            egui::ComboBox::from_id_salt(id.with("cat_combo")).selected_text(category.clone()).show_ui(ui, |ui| {
+                ui.selectable_value(&mut category, "All".to_owned(), "All");
+                let mut categories: Vec<&str> = catalog.iter().map(|e| e.stats.category_label()).collect();
+                categories.sort_unstable();
+                categories.dedup();
+                for c in categories {
+                    ui.selectable_value(&mut category, c.to_owned(), c);
+                }
+            });
+        });
+        ui.separator();
+
+        let q = query.to_ascii_lowercase();
+        ScrollArea::both().show(ui, |ui| {
+            egui::Grid::new(id.with("item_table")).num_columns(9).spacing([10.0, 3.0]).striped(true).show(ui, |ui| {
+                ui.strong("Name");
+                ui.strong("Code");
+                ui.strong("Category");
+                ui.strong("Damage");
+                ui.strong("Dmg Type");
+                ui.strong("Speed");
+                ui.strong("Range");
+                ui.strong("STR");
+                ui.strong("Proficiency");
+                ui.end_row();
+                let mut shown = 0usize;
+                for entry in catalog.iter() {
+                    if category != "All" && entry.stats.category_label() != category {
+                        continue;
+                    }
+                    if !q.is_empty() && !entry.name.to_ascii_lowercase().contains(&q) && !entry.resref.to_ascii_lowercase().contains(&q) {
+                        continue;
+                    }
+                    if ui.selectable_label(false, &entry.name).clicked() {
+                        picked = Some(ResRef::from_str(&entry.resref));
+                    }
+                    ui.label(&entry.resref);
+                    ui.label(entry.stats.category_label());
+                    let ability = entry.stats.ability.as_ref();
+                    ui.label(ability.map(|a| a.damage_string()).unwrap_or_else(|| "-".to_owned()));
+                    ui.label(ability.map(|a| a.damage_type_label()).unwrap_or("-"));
+                    ui.label(ability.map(|a| a.speed_factor.to_string()).unwrap_or_else(|| "-".to_owned()));
+                    ui.label(ability.map(|a| a.range.to_string()).unwrap_or_else(|| "-".to_owned()));
+                    let str_req = if entry.stats.min_strength > 0 { entry.stats.min_strength.to_string() } else { "-".to_owned() };
+                    ui.label(str_req);
+                    let prof = if entry.stats.weapon_prof_id == 0 {
+                        String::new()
+                    } else {
+                        gd.weapon_proficiency_label(entry.stats.weapon_prof_id)
+                    };
+                    ui.label(prof);
+                    ui.end_row();
+                    shown += 1;
+                    if shown >= 500 {
+                        ui.weak("(more than 500 matches — keep typing to narrow it down)");
+                        ui.end_row();
+                        break;
+                    }
+                }
+            });
+        });
+    });
+    ui.memory_mut(|m| {
+        m.data.insert_temp(query_id, query);
+        m.data.insert_temp(category_id, category);
+    });
+    if let Some(rr) = picked {
+        on_select(rr);
+        still_open = false;
+    }
+    still_open
 }
 
 fn drag_u16_inline(ui: &mut Ui, value: &mut u16, dirty: &mut bool) {

@@ -7,6 +7,7 @@
 
 pub mod bif;
 pub mod ids;
+pub mod itm;
 pub mod key;
 pub mod tlk;
 
@@ -19,12 +20,23 @@ use std::rc::Rc;
 use crate::format::primitives::read_u32;
 use bif::BifArchive;
 use ids::IdsTable;
+use itm::ItemStats;
 use key::KeyFile;
 use tlk::TlkFile;
 
 /// A (resref, display name) list for a full resource-type catalog (every
 /// item or every spell in the game), sorted by name.
 pub type Catalog = Rc<Vec<(String, String)>>;
+
+/// One entry in the full item catalog: resref, display name, and parsed
+/// combat/requirement stats (for category filtering and stat columns in
+/// the item picker).
+pub struct ItemEntry {
+    pub resref: String,
+    pub name: String,
+    pub stats: ItemStats,
+}
+pub type ItemCatalog = Rc<Vec<ItemEntry>>;
 
 pub struct GameData {
     root: PathBuf,
@@ -35,6 +47,7 @@ pub struct GameData {
     name_cache: RefCell<HashMap<(String, u16), Option<String>>>,
     item_catalog: RefCell<Option<Catalog>>,
     spell_catalog: RefCell<Option<Catalog>>,
+    item_catalog_full: RefCell<Option<ItemCatalog>>,
 }
 
 impl GameData {
@@ -70,6 +83,7 @@ impl GameData {
             name_cache: RefCell::new(HashMap::new()),
             item_catalog: RefCell::new(None),
             spell_catalog: RefCell::new(None),
+            item_catalog_full: RefCell::new(None),
         })
     }
 
@@ -156,6 +170,20 @@ impl GameData {
         self.ids(ids_name).and_then(|t| t.name(value).map(|s| s.to_string())).unwrap_or_else(|| value.to_string())
     }
 
+    /// Label for an ITM's weapon-proficiency byte. Prefers `PROFTYPE.IDS`,
+    /// falling back to `STATS.IDS` (a much larger general stat-ID table
+    /// that also happens to define the individual weapon-proficiency
+    /// entries) if the former doesn't exist in this install — matching
+    /// NearInfinity's own resolution order exactly.
+    pub fn weapon_proficiency_label(&self, value: u8) -> String {
+        if let Some(t) = self.ids("PROFTYPE.IDS") {
+            if let Some(name) = t.name(value as u32) {
+                return name.to_string();
+            }
+        }
+        self.ids_label("STATS.IDS", value as u32)
+    }
+
     /// Every item in the game as (resref, name), sorted by name. Built
     /// (and cached) on first call — resolves every ITM in the KEY index,
     /// so this can take a moment the first time it's needed.
@@ -166,6 +194,42 @@ impl GameData {
     /// Every spell in the game as (resref, name), sorted by name.
     pub fn spell_catalog(&self) -> Catalog {
         self.catalog(&self.spell_catalog, key::TYPE_SPL, |gd, r| gd.spell_name(r))
+    }
+
+    /// Parses an item's category/proficiency/requirement/combat stats.
+    /// `None` if the resref can't be resolved or its ITM can't be parsed.
+    pub fn item_stats(&self, resref: &str) -> Option<ItemStats> {
+        let bytes = self.resource_bytes(resref, key::TYPE_ITM)?;
+        ItemStats::parse(&bytes).ok()
+    }
+
+    /// Every item in the game as (resref, name, stats), sorted by name —
+    /// the richer counterpart to `item_catalog()` used by the item
+    /// picker's category filter and stat columns. Cached like the other
+    /// catalogs; building it parses every ITM's full stats, not just its
+    /// name, but that's still just extra field reads on already-fetched
+    /// bytes (no extra I/O), so it stays fast in practice.
+    pub fn item_catalog_full(&self) -> ItemCatalog {
+        if let Some(c) = self.item_catalog_full.borrow().as_ref() {
+            return c.clone();
+        }
+        let mut list: Vec<ItemEntry> = self
+            .key
+            .names_of_type(key::TYPE_ITM)
+            .filter_map(|entry| {
+                let resref = entry.name.as_str();
+                let name = self.item_name(&resref)?;
+                if name.trim().is_empty() || name.trim().eq_ignore_ascii_case("<NO TEXT>") {
+                    return None;
+                }
+                let stats = self.item_stats(&resref)?;
+                Some(ItemEntry { resref, name, stats })
+            })
+            .collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        let rc: ItemCatalog = Rc::new(list);
+        *self.item_catalog_full.borrow_mut() = Some(rc.clone());
+        rc
     }
 
     fn catalog(
