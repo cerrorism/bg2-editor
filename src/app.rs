@@ -687,11 +687,24 @@ fn item_picker_window(ui: &mut Ui, id: egui::Id, gd: &GameData, mut on_select: i
             ui.label("Category:");
             egui::ComboBox::from_id_salt(id.with("cat_combo")).selected_text(category.clone()).show_ui(ui, |ui| {
                 ui.selectable_value(&mut category, "All".to_owned(), "All");
-                let mut categories: Vec<&str> = catalog.iter().map(|e| e.stats.category_label()).collect();
-                categories.sort_unstable();
-                categories.dedup();
-                for c in categories {
-                    ui.selectable_value(&mut category, c.to_owned(), c);
+                let present: std::collections::HashSet<u16> = catalog.iter().map(|e| e.stats.category_id).collect();
+                // Grouped (weapons/ammo/armor/jewelry/consumables/misc)
+                // rather than alphabetical, so related categories (e.g.
+                // every sword type) sit together instead of being spread
+                // across a 78-entry alphabetical scroll by unrelated names.
+                for (group_name, ids) in crate::gamedata::itm::CATEGORY_GROUPS {
+                    let any_present = ids.iter().any(|id| present.contains(id));
+                    if !any_present {
+                        continue;
+                    }
+                    ui.label(egui::RichText::new(group_name).strong().small());
+                    for &cat_id in ids {
+                        if !present.contains(&cat_id) {
+                            continue;
+                        }
+                        let label = crate::gamedata::itm::CATEGORIES.get(cat_id as usize).copied().unwrap_or("?");
+                        ui.selectable_value(&mut category, label.to_owned(), label);
+                    }
                 }
             });
         });

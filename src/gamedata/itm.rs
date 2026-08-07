@@ -25,6 +25,24 @@ pub const CATEGORIES: [&str; 78] = [
     "Earrings", "Teeth", "Bracelets",
 ];
 
+/// Category IDs (indices into `CATEGORIES`) in a sensible browsing order
+/// — weapons, then ammo, armor, jewelry, consumables, misc, uncategorized
+/// — instead of alphabetical (where e.g. "Large swords" and "Small
+/// swords" end up far apart, sorted next to "Lenses" and "Slings").
+/// Source, verified: `ItemTypeBitmap.java` `SUGGESTED_CATEGORY_ORDER`
+/// static initializer (the `items` array, which is itself the desired
+/// order — the class inverts it into a index->position lookup, but the
+/// order we want *is* this literal array).
+pub const CATEGORY_GROUPS: [(&str, &[u16]); 7] = [
+    ("Weapons", &[25, 44, 17, 23, 22, 15, 16, 24, 30, 21, 18, 29, 26, 57, 69, 20, 19, 28, 27]),
+    ("Ammo", &[14, 31, 5]),
+    ("Armor", &[2, 60, 61, 66, 62, 68, 63, 64, 65, 67, 32, 12, 41, 53, 49, 47, 7, 72, 6, 70, 73, 3, 4]),
+    ("Jewelry", &[10, 1]),
+    ("Consumables & Containers", &[9, 56, 11, 37, 50, 35, 51, 36, 58]),
+    ("Misc", &[0, 13, 71, 34, 39, 55, 59, 74, 75, 76, 77]),
+    ("Uncategorized", &[8, 33, 38, 40, 42, 43, 45, 46, 48, 52, 54]),
+];
+
 pub const ATTACK_TYPES: [&str; 5] = ["None", "Melee", "Ranged", "Magical", "Launcher"];
 pub const LAUNCHER_TYPES: [&str; 4] = ["None", "Bow", "Crossbow", "Sling"];
 /// Index = raw `Damage type` value (ability offset +28). Source:
@@ -155,7 +173,13 @@ impl ItemStats {
             price,
             weight,
             enchantment,
-            two_handed: flags & 0b100 != 0, // bit 2 = "Two-handed"
+            // "Two-handed" is FLAGS_ARRAY[2], but NearInfinity's Flag
+            // datatype maps array index N (N>=1) to bit (N-1) — array[0]
+            // is the "none set" label, not bit 0 — so this is bit 1
+            // (0x2), not bit 2 (0x4). Confirmed against a real Long Sword
+            // (should be one-handed; array-index-as-bit gave a false
+            // "two-handed").
+            two_handed: flags & 0b010 != 0,
             ability,
         })
     }
