@@ -5,10 +5,13 @@
 //! attributes — only for showing human-readable names instead of resrefs
 //! and numeric IDs.
 
+pub mod bam;
 pub mod bif;
 pub mod ids;
 pub mod itm;
 pub mod key;
+pub mod portrait;
+pub mod spl;
 pub mod tlk;
 
 use std::cell::RefCell;
@@ -22,6 +25,7 @@ use bif::BifArchive;
 use ids::IdsTable;
 use itm::ItemStats;
 use key::KeyFile;
+use spl::SpellStats;
 use tlk::TlkFile;
 
 /// A (resref, display name) list for a full resource-type catalog (every
@@ -38,8 +42,25 @@ pub struct ItemEntry {
 }
 pub type ItemCatalog = Rc<Vec<ItemEntry>>;
 
+/// One entry in the full spell catalog: resref, display name, and parsed
+/// level/type/school/ability stats (for the spell picker's detail pane).
+pub struct SpellEntry {
+    pub resref: String,
+    pub name: String,
+    pub stats: SpellStats,
+}
+pub type SpellCatalog = Rc<Vec<SpellEntry>>;
+
 pub struct GameData {
     root: PathBuf,
+    /// The per-user "portraits" folder alongside the `save` folder in
+    /// Documents (e.g. `.../Baldur's Gate - Enhanced Edition/portraits`)
+    /// — where player-customized character portraits actually live, as
+    /// opposed to a `Portraits/` folder in the game install itself (which
+    /// holds the stock companion/NPC portraits and, on many installs,
+    /// doesn't exist as a loose folder at all). Set via
+    /// `with_extra_portraits_dir` once the save folder is known.
+    extra_portraits_dir: Option<PathBuf>,
     key: KeyFile,
     tlk: TlkFile,
     bif_archives: RefCell<HashMap<u32, BifArchive>>,
@@ -48,6 +69,7 @@ pub struct GameData {
     item_catalog: RefCell<Option<Catalog>>,
     spell_catalog: RefCell<Option<Catalog>>,
     item_catalog_full: RefCell<Option<ItemCatalog>>,
+    spell_catalog_full: RefCell<Option<SpellCatalog>>,
 }
 
 impl GameData {
@@ -76,6 +98,7 @@ impl GameData {
 
         Ok(GameData {
             root: root.to_path_buf(),
+            extra_portraits_dir: None,
             key,
             tlk,
             bif_archives: RefCell::new(HashMap::new()),
@@ -84,7 +107,41 @@ impl GameData {
             item_catalog: RefCell::new(None),
             spell_catalog: RefCell::new(None),
             item_catalog_full: RefCell::new(None),
+            spell_catalog_full: RefCell::new(None),
         })
+    }
+
+    /// Attaches the per-user Documents `portraits` folder (sibling of the
+    /// `save` folder) so player-customized portraits — which live there,
+    /// not in the game install — can be resolved. Builder-style since
+    /// `GameData` is usually held as `Rc<GameData>` once loaded, so a
+    /// plain `&mut self` setter wouldn't be usable after construction.
+    pub fn with_extra_portraits_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.extra_portraits_dir = dir;
+        self
+    }
+
+    /// Raw bytes of a portrait BMP. Tries, in order: the per-user
+    /// Documents `portraits` folder (player-customized portraits),
+    /// a loose `Portraits/` folder in the game install (stock companion
+    /// portraits, on installs that ship them loose rather than bif'd),
+    /// then the ordinary KEY/BIF resource path.
+    pub fn portrait_bytes(&self, resref: &str) -> Option<Vec<u8>> {
+        let filename = format!("{}.BMP", resref.to_ascii_uppercase());
+        if let Some(dir) = &self.extra_portraits_dir {
+            if let Ok(bytes) = fs::read(dir.join(&filename)) {
+                return Some(bytes);
+            }
+        }
+        if let Ok(bytes) = fs::read(self.root.join("Portraits").join(&filename)) {
+            return Some(bytes);
+        }
+        self.resource_bytes(resref, key::TYPE_BMP)
+    }
+
+    /// Raw bytes of a BAM icon (item/spell inventory icon resref).
+    pub fn icon_bytes(&self, resref: &str) -> Option<Vec<u8>> {
+        self.resource_bytes(resref, key::TYPE_BAM)
     }
 
     fn resource_bytes(&self, name: &str, restype: u16) -> Option<Vec<u8>> {
@@ -229,6 +286,39 @@ impl GameData {
         list.sort_by(|a, b| a.name.cmp(&b.name));
         let rc: ItemCatalog = Rc::new(list);
         *self.item_catalog_full.borrow_mut() = Some(rc.clone());
+        rc
+    }
+
+    /// Parses a spell's level/school/type/ability stats. `None` if the
+    /// resref can't be resolved or its SPL can't be parsed.
+    pub fn spell_stats(&self, resref: &str) -> Option<SpellStats> {
+        let bytes = self.resource_bytes(resref, key::TYPE_SPL)?;
+        SpellStats::parse(&bytes).ok()
+    }
+
+    /// Every spell in the game as (resref, name, stats), sorted by name —
+    /// the richer counterpart to `spell_catalog()` used by the spell
+    /// picker's detail pane. Cached like the other catalogs.
+    pub fn spell_catalog_full(&self) -> SpellCatalog {
+        if let Some(c) = self.spell_catalog_full.borrow().as_ref() {
+            return c.clone();
+        }
+        let mut list: Vec<SpellEntry> = self
+            .key
+            .names_of_type(key::TYPE_SPL)
+            .filter_map(|entry| {
+                let resref = entry.name.as_str();
+                let name = self.spell_name(&resref)?;
+                if name.trim().is_empty() || name.trim().eq_ignore_ascii_case("<NO TEXT>") {
+                    return None;
+                }
+                let stats = self.spell_stats(&resref)?;
+                Some(SpellEntry { resref, name, stats })
+            })
+            .collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        let rc: SpellCatalog = Rc::new(list);
+        *self.spell_catalog_full.borrow_mut() = Some(rc.clone());
         rc
     }
 

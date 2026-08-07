@@ -1,4 +1,4 @@
-use bg2_editor::{app, fonts};
+use bg2_editor::{app, fonts, theme};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -9,6 +9,7 @@ fn main() -> eframe::Result<()> {
         "BG2:EE Save Editor",
         options,
         Box::new(|cc| {
+            theme::setup(&cc.egui_ctx);
             fonts::setup(&cc.egui_ctx);
             Ok(Box::new(app::Bg2EditorApp::default()))
         }),

@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -7,7 +9,7 @@ use crate::config;
 use crate::format::cre::{CreV1, InvItem, KnownSpell, MemorizedSpell, ITEM_SLOT_NAMES};
 use crate::format::gam::GamFile;
 use crate::format::primitives::ResRef;
-use crate::gamedata::GameData;
+use crate::gamedata::{key, GameData};
 use crate::save_file;
 
 #[derive(PartialEq, Clone, Copy)]
@@ -16,6 +18,26 @@ enum Tab {
     ClassSkills,
     Inventory,
     Spells,
+}
+
+/// Decoded-image texture cache, keyed by (uppercased resref, resource
+/// type) — shared by portraits (`key::TYPE_BMP`) and item/spell icons
+/// (`key::TYPE_BAM`). `None` is cached on decode failure so a missing
+/// image isn't re-attempted every single frame. Lives on the app, not
+/// `GameData`, since `GameData` is deliberately egui-agnostic (it's
+/// exercised directly by plain `examples/*.rs` binaries with no UI
+/// context) — `egui::TextureHandle` has no business there.
+type TextureCache = RefCell<HashMap<(String, u16), Option<egui::TextureHandle>>>;
+
+/// Bundles the two things every resref-picker widget needs — game data
+/// (for names/stats/descriptions) and the texture cache (for icons) —
+/// into one parameter instead of threading them separately through the
+/// `edit_resref` → `picker_button` → `{item,spell}_picker_window` call
+/// chain.
+#[derive(Clone, Copy)]
+struct PickerCtx<'a> {
+    gd: &'a GameData,
+    textures: &'a TextureCache,
 }
 
 pub struct Bg2EditorApp {
@@ -29,6 +51,7 @@ pub struct Bg2EditorApp {
     status_msg: String,
     game_root: Option<PathBuf>,
     game_data: Option<Rc<GameData>>,
+    texture_cache: TextureCache,
 }
 
 impl Default for Bg2EditorApp {
@@ -53,11 +76,13 @@ impl Default for Bg2EditorApp {
             status_msg: String::new(),
             game_root: None,
             game_data: None,
+            texture_cache: RefCell::new(HashMap::new()),
         };
         if let Some(root) = config::load_game_root() {
             let locale = app.save_root.as_deref().and_then(save_file::detect_active_language);
+            let portraits_dir = app.save_root.as_deref().and_then(save_file::portraits_dir);
             if let Ok(data) = GameData::load_with_locale(&root, locale.as_deref()) {
-                app.game_data = Some(Rc::new(data));
+                app.game_data = Some(Rc::new(data.with_extra_portraits_dir(portraits_dir)));
                 app.game_root = Some(root);
             }
         }
@@ -95,8 +120,10 @@ impl Bg2EditorApp {
                         // set first (order-independent either way).
                         if let Some(game_root) = self.game_root.clone() {
                             let locale = self.save_root.as_deref().and_then(save_file::detect_active_language);
+                            let portraits_dir = self.save_root.as_deref().and_then(save_file::portraits_dir);
                             if let Ok(data) = GameData::load_with_locale(&game_root, locale.as_deref()) {
-                                self.game_data = Some(Rc::new(data));
+                                self.game_data = Some(Rc::new(data.with_extra_portraits_dir(portraits_dir)));
+                                self.texture_cache.borrow_mut().clear();
                             }
                         }
                     }
@@ -123,11 +150,13 @@ impl Bg2EditorApp {
                     }
                     if let Some(folder) = dialog.pick_folder() {
                         let locale = self.save_root.as_deref().and_then(save_file::detect_active_language);
+                        let portraits_dir = self.save_root.as_deref().and_then(save_file::portraits_dir);
                         match GameData::load_with_locale(&folder, locale.as_deref()) {
                             Ok(data) => {
                                 config::save_game_root(&folder);
                                 self.game_root = Some(folder);
-                                self.game_data = Some(Rc::new(data));
+                                self.game_data = Some(Rc::new(data.with_extra_portraits_dir(portraits_dir)));
+                                self.texture_cache.borrow_mut().clear();
                                 self.status_msg = match &locale {
                                     Some(l) => format!("Game data loaded (using {l} text)."),
                                     None => "Game data loaded (using default/English text).".to_owned(),
@@ -253,11 +282,37 @@ impl Bg2EditorApp {
                 self.selected_char_idx = 0;
             }
 
+            let selected_name = member_display_name(&gam.party[self.selected_char_idx], self.game_data.as_deref());
+
             ui.horizontal(|ui| {
                 for (i, member) in gam.party.iter().enumerate() {
                     let name = member_display_name(member, self.game_data.as_deref());
-                    ui.selectable_value(&mut self.selected_char_idx, i, name);
+                    ui.vertical(|ui| {
+                        if let (Some(gd), Some(cre)) = (self.game_data.as_deref(), member.cre.as_ref()) {
+                            let resref = cre.portrait_small.as_str();
+                            if let Some(tex) = get_or_load_texture(&self.texture_cache, ui.ctx(), gd, &resref, key::TYPE_BMP) {
+                                ui.add(egui::Image::new(&tex).max_height(48.0));
+                            }
+                        }
+                        ui.selectable_value(&mut self.selected_char_idx, i, name);
+                    });
                 }
+            });
+            ui.separator();
+
+            let Some(cre) = gam.party[self.selected_char_idx].cre.as_mut() else {
+                ui.label("This party member has no embedded character data (external reference).");
+                return;
+            };
+
+            ui.horizontal(|ui| {
+                if let Some(gd) = self.game_data.as_deref() {
+                    let resref = cre.portrait_large.as_str();
+                    if let Some(tex) = get_or_load_texture(&self.texture_cache, ui.ctx(), gd, &resref, key::TYPE_BMP) {
+                        ui.add(egui::Image::new(&tex).max_height(96.0));
+                    }
+                }
+                ui.heading(selected_name);
             });
             ui.separator();
 
@@ -269,18 +324,14 @@ impl Bg2EditorApp {
             });
             ui.separator();
 
-            let Some(cre) = gam.party[self.selected_char_idx].cre.as_mut() else {
-                ui.label("This party member has no embedded character data (external reference).");
-                return;
-            };
-
             let dirty = &mut self.is_dirty;
             let gd = self.game_data.as_deref();
+            let textures = &self.texture_cache;
             ScrollArea::vertical().show(ui, |ui| match self.tab {
                 Tab::Abilities => tab_abilities(ui, cre, dirty),
                 Tab::ClassSkills => tab_class_skills(ui, cre, dirty, gd),
-                Tab::Inventory => tab_inventory(ui, cre, dirty, gd),
-                Tab::Spells => tab_spells(ui, cre, dirty, gd),
+                Tab::Inventory => tab_inventory(ui, cre, dirty, gd, textures),
+                Tab::Spells => tab_spells(ui, cre, dirty, gd, textures),
             });
         });
     }
@@ -561,6 +612,34 @@ fn ids_field_kit(ui: &mut Ui, label: &str, value: &mut u32, gd: Option<&GameData
     ui.end_row();
 }
 
+/// Resolves and caches a decoded texture for a portrait (`key::TYPE_BMP`)
+/// or item/spell icon (`key::TYPE_BAM`) resref. `None` is cached on
+/// failure (unresolvable resref, or a resource type not yet wired up
+/// below) so a bad lookup isn't retried every frame.
+fn get_or_load_texture(
+    textures: &TextureCache,
+    ctx: &egui::Context,
+    gd: &GameData,
+    resref: &str,
+    restype: u16,
+) -> Option<egui::TextureHandle> {
+    if resref.trim().is_empty() {
+        return None;
+    }
+    let cache_key = (resref.to_ascii_uppercase(), restype);
+    if let Some(cached) = textures.borrow().get(&cache_key) {
+        return cached.clone();
+    }
+    let color_image = match restype {
+        key::TYPE_BMP => gd.portrait_bytes(resref).and_then(|b| crate::gamedata::portrait::decode_bmp_to_color_image(&b).ok()),
+        key::TYPE_BAM => gd.icon_bytes(resref).and_then(|b| crate::gamedata::bam::decode_bam_frame(&b, 0).ok()),
+        _ => None,
+    };
+    let handle = color_image.map(|img| ctx.load_texture(format!("{:x}:{}", restype, cache_key.0), img, egui::TextureOptions::default()));
+    textures.borrow_mut().insert(cache_key, handle.clone());
+    handle
+}
+
 #[derive(Clone, Copy)]
 enum CatalogKind {
     Item,
@@ -581,7 +660,7 @@ impl CatalogKind {
 /// display name plus a "🔍" search-by-name picker button — callers must
 /// account for that extra column in their `Grid::num_columns` when a game
 /// folder is set.
-fn edit_resref(ui: &mut Ui, id: egui::Id, resref: &mut ResRef, dirty: &mut bool, width: f32, gd: Option<&GameData>, kind: CatalogKind) {
+fn edit_resref(ui: &mut Ui, id: egui::Id, resref: &mut ResRef, dirty: &mut bool, width: f32, pc: Option<PickerCtx>, kind: CatalogKind) {
     let mut s = resref.as_str();
     if ui.add(egui::TextEdit::singleline(&mut s).desired_width(width)).changed() {
         s.truncate(8);
@@ -591,14 +670,14 @@ fn edit_resref(ui: &mut Ui, id: egui::Id, resref: &mut ResRef, dirty: &mut bool,
             *dirty = true;
         }
     }
-    if let Some(gd) = gd {
+    if let Some(pc) = pc {
         ui.horizontal(|ui| {
             if !resref.is_empty() {
-                let label = kind.name(gd, &resref.as_str()).unwrap_or_else(|| "(unknown)".to_owned());
+                let label = kind.name(pc.gd, &resref.as_str()).unwrap_or_else(|| "(unknown)".to_owned());
                 ui.label(egui::RichText::new(label).weak());
             }
             let mut picked = None;
-            picker_button(ui, id, "🔍", gd, kind, |rr| picked = Some(rr));
+            picker_button(ui, id, "🔍", pc, kind, |rr| picked = Some(rr));
             if let Some(rr) = picked {
                 *resref = rr;
                 *dirty = true;
@@ -613,7 +692,7 @@ fn edit_resref(ui: &mut Ui, id: egui::Id, resref: &mut ResRef, dirty: &mut bool,
 /// category filter persist in egui's own per-`id` memory, so this needs
 /// no state in `Bg2EditorApp` and multiple pickers on screen at once
 /// (one per row) don't interfere with each other.
-fn picker_button(ui: &mut Ui, id: egui::Id, button_label: &str, gd: &GameData, kind: CatalogKind, on_select: impl FnMut(ResRef)) {
+fn picker_button(ui: &mut Ui, id: egui::Id, button_label: &str, pc: PickerCtx, kind: CatalogKind, on_select: impl FnMut(ResRef)) {
     let open_id = id.with("picker_open");
     if ui.button(button_label).clicked() {
         ui.memory_mut(|m| m.data.insert_temp(open_id, true));
@@ -623,42 +702,120 @@ fn picker_button(ui: &mut Ui, id: egui::Id, button_label: &str, gd: &GameData, k
         return;
     }
     let still_open = match kind {
-        CatalogKind::Item => item_picker_window(ui, id, gd, on_select),
-        CatalogKind::Spell => spell_picker_window(ui, id, gd, on_select),
+        CatalogKind::Item => item_picker_window(ui, id, pc, on_select),
+        CatalogKind::Spell => spell_picker_window(ui, id, pc, on_select),
     };
     ui.memory_mut(|m| m.data.insert_temp(open_id, still_open));
 }
 
-/// Simple name/code search list (spells have no comparable per-entry
-/// stats worth a table). Returns whether the window should stay open.
-fn spell_picker_window(ui: &mut Ui, id: egui::Id, gd: &GameData, mut on_select: impl FnMut(ResRef)) -> bool {
+/// Two-column picker: a filterable name/code list on the left, and on
+/// the right a detail pane with the spell's icon, level/type/school,
+/// and full in-game description (localized via `dialog.tlk`) for
+/// whichever entry is currently focused. Clicking a row focuses it
+/// (populating the detail pane); double-clicking it, or the detail
+/// pane's "Select" button, confirms the pick and closes the window —
+/// browsing has a real cost once it means loading a description and an
+/// icon, so a single stray click no longer closes the window outright.
+/// Returns whether the window should stay open.
+fn spell_picker_window(ui: &mut Ui, id: egui::Id, pc: PickerCtx, mut on_select: impl FnMut(ResRef)) -> bool {
     let query_id = id.with("picker_query");
+    let focused_id = id.with("picker_focused");
     let mut query: String = ui.memory(|m| m.data.get_temp::<String>(query_id)).unwrap_or_default();
+    let mut focused: Option<String> = ui.memory(|m| m.data.get_temp::<String>(focused_id));
     let mut still_open = true;
     let mut picked: Option<ResRef> = None;
-    egui::Window::new("Pick a Spell").id(id.with("picker_window")).open(&mut still_open).default_width(420.0).default_height(480.0).show(ui.ctx(), |ui| {
-        ui.add(egui::TextEdit::singleline(&mut query).hint_text("Search by name or code…"));
+
+    egui::Window::new("Pick a Spell").id(id.with("picker_window")).open(&mut still_open).default_width(720.0).default_height(520.0).show(ui.ctx(), |ui| {
+        let catalog = pc.gd.spell_catalog_full();
+        ui.add(egui::TextEdit::singleline(&mut query).hint_text("Search by name or code…").desired_width(300.0));
         ui.separator();
-        let catalog = gd.spell_catalog();
-        let q = query.to_ascii_lowercase();
-        ScrollArea::vertical().show(ui, |ui| {
-            let mut shown = 0usize;
-            for (rr, name) in catalog.iter() {
-                if !q.is_empty() && !name.to_ascii_lowercase().contains(&q) && !rr.to_ascii_lowercase().contains(&q) {
-                    continue;
+
+        egui::SidePanel::left(id.with("picker_list_panel")).resizable(true).default_width(300.0).show_inside(ui, |ui| {
+            let q = query.to_ascii_lowercase();
+            ScrollArea::vertical().show(ui, |ui| {
+                let mut shown = 0usize;
+                for entry in catalog.iter() {
+                    if !q.is_empty() && !entry.name.to_ascii_lowercase().contains(&q) && !entry.resref.to_ascii_lowercase().contains(&q) {
+                        continue;
+                    }
+                    let is_focused = focused.as_deref() == Some(entry.resref.as_str());
+                    let resp = ui.selectable_label(is_focused, format!("{}  [{}]", entry.name, entry.resref));
+                    if resp.double_clicked() {
+                        picked = Some(ResRef::from_str(&entry.resref));
+                    } else if resp.clicked() {
+                        focused = Some(entry.resref.clone());
+                    }
+                    shown += 1;
+                    if shown >= 300 {
+                        ui.weak("(more than 300 matches — keep typing to narrow it down)");
+                        break;
+                    }
                 }
-                if ui.selectable_label(false, format!("{name}  [{rr}]")).clicked() {
-                    picked = Some(ResRef::from_str(rr));
+            });
+        });
+
+        ScrollArea::vertical().id_salt("spell_detail_scroll").show(ui, |ui| {
+            match catalog.iter().find(|e| Some(e.resref.as_str()) == focused.as_deref()) {
+                Some(entry) => {
+                    ui.horizontal(|ui| {
+                        if let Some(tex) = get_or_load_texture(pc.textures, ui.ctx(), pc.gd, &entry.stats.icon.as_str(), key::TYPE_BAM) {
+                            ui.add(egui::Image::new(&tex).max_height(48.0));
+                        }
+                        ui.vertical(|ui| {
+                            ui.heading(&entry.name);
+                            ui.label(format!(
+                                "Level {} {} — {} / {}",
+                                entry.stats.spell_level,
+                                entry.stats.spell_type_label(),
+                                entry.stats.school_label(),
+                                entry.stats.secondary_type_label(),
+                            ));
+                        });
+                    });
+                    ui.separator();
+                    match entry.stats.description(pc.gd) {
+                        Some(desc) => {
+                            ui.label(desc);
+                        }
+                        None => {
+                            ui.weak("(no description text found)");
+                        }
+                    }
+                    ui.separator();
+                    if let Some(a) = entry.stats.ability.as_ref() {
+                        egui::Grid::new(id.with("spell_detail_stats")).num_columns(2).show(ui, |ui| {
+                            ui.label("Target:");
+                            ui.label(a.target_label());
+                            ui.end_row();
+                            ui.label("Range (ft):");
+                            ui.label(a.range_feet.to_string());
+                            ui.end_row();
+                            ui.label("Casting speed:");
+                            ui.label(a.casting_speed.to_string());
+                            ui.end_row();
+                        });
+                        ui.separator();
+                    }
+                    if ui.button(format!("Select {}", entry.name)).clicked() {
+                        picked = Some(ResRef::from_str(&entry.resref));
+                    }
                 }
-                shown += 1;
-                if shown >= 300 {
-                    ui.weak("(more than 300 matches — keep typing to narrow it down)");
-                    break;
+                None => {
+                    ui.weak("Select a spell on the left to see details.");
                 }
             }
         });
     });
-    ui.memory_mut(|m| m.data.insert_temp(query_id, query));
+
+    ui.memory_mut(|m| {
+        m.data.insert_temp(query_id, query);
+        match &focused {
+            Some(f) => m.data.insert_temp(focused_id, f.clone()),
+            None => {
+                m.data.remove_temp::<String>(focused_id);
+            }
+        }
+    });
     if let Some(rr) = picked {
         on_select(rr);
         still_open = false;
@@ -666,21 +823,26 @@ fn spell_picker_window(ui: &mut Ui, id: egui::Id, gd: &GameData, mut on_select: 
     still_open
 }
 
-/// Item picker: category filter + name/code search + a stat table
-/// (damage, damage type, speed factor, range, STR requirement,
-/// two-handed, weapon proficiency) so weapons can actually be compared
-/// rather than picked blind by name. Returns whether the window should
-/// stay open.
-fn item_picker_window(ui: &mut Ui, id: egui::Id, gd: &GameData, mut on_select: impl FnMut(ResRef)) -> bool {
+/// Two-column picker: category filter + name/code search over a
+/// compact left-hand list, and on the right a detail pane with the
+/// focused item's icon, full in-game description (localized via
+/// `dialog.tlk`), and combat/requirement stats (damage, damage type,
+/// speed factor, range, STR requirement, two-handed, weapon
+/// proficiency) — so weapons can actually be compared, not just picked
+/// blind by name. Same focus/double-click/Select-button confirm model
+/// as `spell_picker_window`. Returns whether the window should stay open.
+fn item_picker_window(ui: &mut Ui, id: egui::Id, pc: PickerCtx, mut on_select: impl FnMut(ResRef)) -> bool {
     let query_id = id.with("picker_query");
     let category_id = id.with("picker_category");
+    let focused_id = id.with("picker_focused");
     let mut query: String = ui.memory(|m| m.data.get_temp::<String>(query_id)).unwrap_or_default();
     let mut category: String = ui.memory(|m| m.data.get_temp::<String>(category_id)).unwrap_or_else(|| "All".to_owned());
+    let mut focused: Option<String> = ui.memory(|m| m.data.get_temp::<String>(focused_id));
     let mut still_open = true;
     let mut picked: Option<ResRef> = None;
 
-    egui::Window::new("Pick an Item").id(id.with("picker_window")).open(&mut still_open).default_width(760.0).default_height(560.0).show(ui.ctx(), |ui| {
-        let catalog = gd.item_catalog_full();
+    egui::Window::new("Pick an Item").id(id.with("picker_window")).open(&mut still_open).default_width(820.0).default_height(560.0).show(ui.ctx(), |ui| {
+        let catalog = pc.gd.item_catalog_full();
 
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut query).hint_text("Search by name or code…").desired_width(220.0));
@@ -710,19 +872,9 @@ fn item_picker_window(ui: &mut Ui, id: egui::Id, gd: &GameData, mut on_select: i
         });
         ui.separator();
 
-        let q = query.to_ascii_lowercase();
-        ScrollArea::both().show(ui, |ui| {
-            egui::Grid::new(id.with("item_table")).num_columns(9).spacing([10.0, 3.0]).striped(true).show(ui, |ui| {
-                ui.strong("Name");
-                ui.strong("Code");
-                ui.strong("Category");
-                ui.strong("Damage");
-                ui.strong("Dmg Type");
-                ui.strong("Speed");
-                ui.strong("Range");
-                ui.strong("STR");
-                ui.strong("Proficiency");
-                ui.end_row();
+        egui::SidePanel::left(id.with("picker_list_panel")).resizable(true).default_width(300.0).show_inside(ui, |ui| {
+            let q = query.to_ascii_lowercase();
+            ScrollArea::vertical().show(ui, |ui| {
                 let mut shown = 0usize;
                 for entry in catalog.iter() {
                     if category != "All" && entry.stats.category_label() != category {
@@ -731,38 +883,91 @@ fn item_picker_window(ui: &mut Ui, id: egui::Id, gd: &GameData, mut on_select: i
                     if !q.is_empty() && !entry.name.to_ascii_lowercase().contains(&q) && !entry.resref.to_ascii_lowercase().contains(&q) {
                         continue;
                     }
-                    if ui.selectable_label(false, &entry.name).clicked() {
+                    let is_focused = focused.as_deref() == Some(entry.resref.as_str());
+                    let resp = ui.selectable_label(is_focused, format!("{}  [{}]", entry.name, entry.resref));
+                    if resp.double_clicked() {
                         picked = Some(ResRef::from_str(&entry.resref));
+                    } else if resp.clicked() {
+                        focused = Some(entry.resref.clone());
                     }
-                    ui.label(&entry.resref);
-                    ui.label(entry.stats.category_label());
-                    let ability = entry.stats.ability.as_ref();
-                    ui.label(ability.map(|a| a.damage_string()).unwrap_or_else(|| "-".to_owned()));
-                    ui.label(ability.map(|a| a.damage_type_label()).unwrap_or("-"));
-                    ui.label(ability.map(|a| a.speed_factor.to_string()).unwrap_or_else(|| "-".to_owned()));
-                    ui.label(ability.map(|a| a.range.to_string()).unwrap_or_else(|| "-".to_owned()));
-                    let str_req = if entry.stats.min_strength > 0 { entry.stats.min_strength.to_string() } else { "-".to_owned() };
-                    ui.label(str_req);
-                    let prof = if entry.stats.weapon_prof_id == 0 {
-                        String::new()
-                    } else {
-                        gd.weapon_proficiency_label(entry.stats.weapon_prof_id)
-                    };
-                    ui.label(prof);
-                    ui.end_row();
                     shown += 1;
                     if shown >= 500 {
                         ui.weak("(more than 500 matches — keep typing to narrow it down)");
-                        ui.end_row();
                         break;
                     }
                 }
             });
         });
+
+        ScrollArea::vertical().id_salt("item_detail_scroll").show(ui, |ui| {
+            match catalog.iter().find(|e| Some(e.resref.as_str()) == focused.as_deref()) {
+                Some(entry) => {
+                    ui.horizontal(|ui| {
+                        if let Some(tex) = get_or_load_texture(pc.textures, ui.ctx(), pc.gd, &entry.stats.icon.as_str(), key::TYPE_BAM) {
+                            ui.add(egui::Image::new(&tex).max_height(48.0));
+                        }
+                        ui.vertical(|ui| {
+                            ui.heading(&entry.name);
+                            ui.label(entry.stats.category_label());
+                        });
+                    });
+                    ui.separator();
+                    match entry.stats.description(pc.gd) {
+                        Some(desc) => {
+                            ui.label(desc);
+                        }
+                        None => {
+                            ui.weak("(no description text found)");
+                        }
+                    }
+                    ui.separator();
+                    let ability = entry.stats.ability.as_ref();
+                    egui::Grid::new(id.with("item_detail_stats")).num_columns(2).show(ui, |ui| {
+                        ui.label("Damage:");
+                        ui.label(ability.map(|a| a.damage_string()).unwrap_or_else(|| "-".to_owned()));
+                        ui.end_row();
+                        ui.label("Damage type:");
+                        ui.label(ability.map(|a| a.damage_type_label()).unwrap_or("-"));
+                        ui.end_row();
+                        ui.label("Speed factor:");
+                        ui.label(ability.map(|a| a.speed_factor.to_string()).unwrap_or_else(|| "-".to_owned()));
+                        ui.end_row();
+                        ui.label("Range:");
+                        ui.label(ability.map(|a| a.range.to_string()).unwrap_or_else(|| "-".to_owned()));
+                        ui.end_row();
+                        ui.label("STR required:");
+                        ui.label(if entry.stats.min_strength > 0 { entry.stats.min_strength.to_string() } else { "-".to_owned() });
+                        ui.end_row();
+                        ui.label("Two-handed:");
+                        ui.label(if entry.stats.two_handed { "Yes" } else { "No" });
+                        ui.end_row();
+                        if entry.stats.weapon_prof_id != 0 {
+                            ui.label("Proficiency:");
+                            ui.label(pc.gd.weapon_proficiency_label(entry.stats.weapon_prof_id));
+                            ui.end_row();
+                        }
+                    });
+                    ui.separator();
+                    if ui.button(format!("Select {}", entry.name)).clicked() {
+                        picked = Some(ResRef::from_str(&entry.resref));
+                    }
+                }
+                None => {
+                    ui.weak("Select an item on the left to see details.");
+                }
+            }
+        });
     });
+
     ui.memory_mut(|m| {
         m.data.insert_temp(query_id, query);
         m.data.insert_temp(category_id, category);
+        match &focused {
+            Some(f) => m.data.insert_temp(focused_id, f.clone()),
+            None => {
+                m.data.remove_temp::<String>(focused_id);
+            }
+        }
     });
     if let Some(rr) = picked {
         on_select(rr);
@@ -794,7 +999,8 @@ fn spell_type_combo(ui: &mut Ui, kind: &mut u16, dirty: &mut bool, id: impl std:
     }
 }
 
-fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameData>) {
+fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameData>, textures: &TextureCache) {
+    let pc = gd.map(|gd| PickerCtx { gd, textures });
     let mut to_remove: Option<usize> = None;
 
     ui.columns(2, |cols| {
@@ -841,9 +1047,9 @@ fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&Gam
                 cre.items.push(InvItem { item: ResRef::EMPTY, duration: 0, qty: [1, 0, 0], flags: 1 });
                 *dirty = true;
             }
-            if let Some(gd) = gd {
+            if let Some(pc) = pc {
                 let mut picked = None;
-                picker_button(ui, ui.id().with("add_item"), "🔍 Add via Search", gd, CatalogKind::Item, |rr| picked = Some(rr));
+                picker_button(ui, ui.id().with("add_item"), "🔍 Add via Search", pc, CatalogKind::Item, |rr| picked = Some(rr));
                 if let Some(rr) = picked {
                     cre.items.push(InvItem { item: rr, duration: 0, qty: [1, 0, 0], flags: 1 });
                     *dirty = true;
@@ -867,7 +1073,7 @@ fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&Gam
                 for i in 0..cre.items.len() {
                     ui.label(format!("{i}"));
                     let row_id = ui.id().with(("item_row", i));
-                    edit_resref(ui, row_id, &mut cre.items[i].item, dirty, 70.0, gd, CatalogKind::Item);
+                    edit_resref(ui, row_id, &mut cre.items[i].item, dirty, 70.0, pc, CatalogKind::Item);
                     drag_u16_inline(ui, &mut cre.items[i].qty[0], dirty);
                     drag_u16_inline(ui, &mut cre.items[i].qty[1], dirty);
                     drag_u16_inline(ui, &mut cre.items[i].qty[2], dirty);
@@ -904,7 +1110,8 @@ enum SpellAction {
     RemoveMemorized(usize, usize),
 }
 
-fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameData>) {
+fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameData>, textures: &TextureCache) {
+    let pc = gd.map(|gd| PickerCtx { gd, textures });
     let mut action: Option<SpellAction> = None;
     let known_cols = if gd.is_some() { 5 } else { 4 };
     let mem_cols = if gd.is_some() { 6 } else { 5 };
@@ -915,9 +1122,9 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
             if ui.button("+ Add Blank").clicked() {
                 action = Some(SpellAction::AddKnown(ResRef::EMPTY));
             }
-            if let Some(gd) = gd {
+            if let Some(pc) = pc {
                 let mut picked = None;
-                picker_button(ui, ui.id().with("add_known"), "🔍 Add via Search", gd, CatalogKind::Spell, |rr| picked = Some(rr));
+                picker_button(ui, ui.id().with("add_known"), "🔍 Add via Search", pc, CatalogKind::Spell, |rr| picked = Some(rr));
                 if let Some(rr) = picked {
                     action = Some(SpellAction::AddKnown(rr));
                 }
@@ -935,7 +1142,7 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
                 ui.end_row();
                 for i in 0..cre.known_spells.len() {
                     let row_id = ui.id().with(("known_row", i));
-                    edit_resref(ui, row_id, &mut cre.known_spells[i].spell, dirty, 80.0, gd, CatalogKind::Spell);
+                    edit_resref(ui, row_id, &mut cre.known_spells[i].spell, dirty, 80.0, pc, CatalogKind::Spell);
                     let mut lvl = cre.known_spells[i].level;
                     if ui.add(DragValue::new(&mut lvl).range(0..=9u16)).changed() {
                         cre.known_spells[i].level = lvl;
@@ -989,7 +1196,7 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
                         for local_idx in 0..count {
                             let row_id = ui.id().with(("mem_row", level_idx, local_idx));
                             let spell = &mut cre.memorized_spells[start + local_idx];
-                            edit_resref(ui, row_id, &mut spell.spell, dirty, 80.0, gd, CatalogKind::Spell);
+                            edit_resref(ui, row_id, &mut spell.spell, dirty, 80.0, pc, CatalogKind::Spell);
                             let mut cast = spell.flags & 0b001 != 0;
                             let mut memorized = spell.flags & 0b010 != 0;
                             let mut disabled = spell.flags & 0b100 != 0;
@@ -1010,9 +1217,9 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
                         if ui.button("+ Add Blank Spell").clicked() {
                             action = Some(SpellAction::AddMemorized(level_idx, ResRef::EMPTY));
                         }
-                        if let Some(gd) = gd {
+                        if let Some(pc) = pc {
                             let mut picked = None;
-                            picker_button(ui, ui.id().with(("add_mem", level_idx)), "🔍 Add via Search", gd, CatalogKind::Spell, |rr| picked = Some(rr));
+                            picker_button(ui, ui.id().with(("add_mem", level_idx)), "🔍 Add via Search", pc, CatalogKind::Spell, |rr| picked = Some(rr));
                             if let Some(rr) = picked {
                                 action = Some(SpellAction::AddMemorized(level_idx, rr));
                             }

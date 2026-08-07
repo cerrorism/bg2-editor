@@ -20,7 +20,7 @@ fn main() {
         }
         let a = entry.stats.ability.as_ref();
         println!(
-            "{:8} {:30} category={:20} dmg={:8} type={:10} speed={:>3} range={:>3} STR={:>2} 2H={:5} enchant={} prof={}",
+            "{:8} {:30} category={:20} dmg={:8} type={:10} speed={:>3} range={:>3} STR={:>2} 2H={:5} enchant={} prof={} icon={}",
             entry.resref,
             entry.name,
             entry.stats.category_label(),
@@ -32,6 +32,11 @@ fn main() {
             entry.stats.two_handed,
             entry.stats.enchantment,
             gd.weapon_proficiency_label(entry.stats.weapon_prof_id),
+            entry.stats.icon,
         );
+        match entry.stats.description(&gd) {
+            Some(desc) => println!("  description: {}", desc.chars().take(200).collect::<String>()),
+            None => println!("  description: (none found)"),
+        }
     }
 }

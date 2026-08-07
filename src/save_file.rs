@@ -78,6 +78,17 @@ pub fn detect_active_language(save_root: &Path) -> Option<String> {
     None
 }
 
+/// The per-user Documents `portraits` folder (sibling of `save`), where
+/// player-customized character portraits live — as opposed to the game
+/// install's own `Portraits/` folder, which holds only the stock
+/// companion/NPC portraits (and on many installs doesn't exist loose at
+/// all, since those are bif'd).
+pub fn portraits_dir(save_root: &Path) -> Option<PathBuf> {
+    let docs_game_dir = save_root.parent()?;
+    let dir = docs_game_dir.join("portraits");
+    dir.is_dir().then_some(dir)
+}
+
 fn find_case_insensitive(dir: &Path, name: &str) -> Option<PathBuf> {
     let direct = dir.join(name);
     if direct.is_file() {

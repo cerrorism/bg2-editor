@@ -7,6 +7,8 @@ use std::collections::HashMap;
 
 use crate::format::primitives::{read_resref, read_text, read_u16, read_u32, ResRef};
 
+pub const TYPE_BMP: u16 = 0x1;
+pub const TYPE_BAM: u16 = 0x3E8;
 pub const TYPE_ITM: u16 = 0x3ED;
 pub const TYPE_SPL: u16 = 0x3EE;
 pub const TYPE_IDS: u16 = 0x3F0;

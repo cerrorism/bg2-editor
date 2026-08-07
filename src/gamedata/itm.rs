@@ -6,7 +6,7 @@
 //! `NearInfinity/src/org/infinity/resource/itm/{ItmResource,Ability}.java`
 //! and `resource/AbstractAbility.java`.
 
-use crate::format::primitives::{read_i16, read_u16, read_u32, read_u8};
+use crate::format::primitives::{read_i16, read_resref, read_u16, read_u32, read_u8, ResRef};
 
 /// Index = raw `Category` byte value (ITM offset 28). Source, verified
 /// directly: `ItemTypeBitmap.java` `CATEGORIES_ARRAY` (78 entries).
@@ -108,11 +108,28 @@ pub struct ItemStats {
     /// attack" stats for display, per general Infinity Engine convention
     /// (not something the file format itself designates canonically).
     pub ability: Option<AbilitySummary>,
+    /// Strref of the flavor text shown before the item is identified
+    /// (ITM offset 80).
+    pub unidentified_desc_strref: i32,
+    /// Strref of the full mechanical description shown once identified
+    /// (ITM offset 84) — prefer this over `unidentified_desc_strref` for
+    /// display, falling back to it only if this one is empty.
+    pub identified_desc_strref: i32,
+    /// Inventory icon (BAM) resref (ITM offset 58).
+    pub icon: ResRef,
 }
 
 impl ItemStats {
     pub fn category_label(&self) -> &'static str {
         CATEGORIES.get(self.category_id as usize).copied().unwrap_or("Unknown")
+    }
+
+    /// The identified description, falling back to the unidentified
+    /// flavor text if the identified one isn't present — resolved via
+    /// `dialog.tlk`, so it comes back in whatever language the game data
+    /// was loaded with.
+    pub fn description(&self, gd: &super::GameData) -> Option<String> {
+        gd.tlk_string(self.identified_desc_strref).or_else(|| gd.tlk_string(self.unidentified_desc_strref))
     }
 
     pub fn parse(buf: &[u8]) -> Result<ItemStats, String> {
@@ -131,7 +148,10 @@ impl ItemStats {
         let weapon_prof_id = read_u8(buf, 49);
         let min_charisma = read_u16(buf, 50);
         let price = read_u32(buf, 52);
+        let icon = read_resref(buf, 58);
         let weight = read_u32(buf, 76);
+        let unidentified_desc_strref = read_u32(buf, 80) as i32;
+        let identified_desc_strref = read_u32(buf, 84) as i32;
         let enchantment = read_u32(buf, 96);
         let off_abilities = read_u32(buf, 100) as usize;
         let num_abilities = read_u16(buf, 104) as usize;
@@ -173,6 +193,9 @@ impl ItemStats {
             price,
             weight,
             enchantment,
+            icon,
+            unidentified_desc_strref,
+            identified_desc_strref,
             // "Two-handed" is FLAGS_ARRAY[2], but NearInfinity's Flag
             // datatype maps array index N (N>=1) to bit (N-1) — array[0]
             // is the "none set" label, not bit 0 — so this is bit 1

@@ -456,6 +456,7 @@ dependencies = [
  "eframe",
  "egui",
  "flate2",
+ "image",
  "rfd",
 ]
 
