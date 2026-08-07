@@ -1,10 +1,13 @@
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use egui::{DragValue, ScrollArea, Ui};
 
+use crate::config;
 use crate::format::cre::{CreV1, InvItem, KnownSpell, MemorizedSpell, ITEM_SLOT_NAMES};
 use crate::format::gam::GamFile;
 use crate::format::primitives::ResRef;
+use crate::gamedata::GameData;
 use crate::save_file;
 
 #[derive(PartialEq, Clone, Copy)]
@@ -24,6 +27,8 @@ pub struct Bg2EditorApp {
     tab: Tab,
     is_dirty: bool,
     status_msg: String,
+    game_root: Option<PathBuf>,
+    game_data: Option<Rc<GameData>>,
 }
 
 impl Default for Bg2EditorApp {
@@ -33,7 +38,8 @@ impl Default for Bg2EditorApp {
             .as_deref()
             .map(save_file::list_save_folders)
             .unwrap_or_default();
-        Self {
+
+        let mut app = Self {
             save_root,
             save_folders,
             selected_folder_idx: None,
@@ -42,7 +48,16 @@ impl Default for Bg2EditorApp {
             tab: Tab::Abilities,
             is_dirty: false,
             status_msg: String::new(),
+            game_root: None,
+            game_data: None,
+        };
+        if let Some(root) = config::load_game_root() {
+            if let Ok(data) = GameData::load(&root) {
+                app.game_data = Some(Rc::new(data));
+                app.game_root = Some(root);
+            }
         }
+        app
     }
 }
 
@@ -82,6 +97,34 @@ impl Bg2EditorApp {
                     egui::Label::new(egui::RichText::new(if root_str.is_empty() { "(no folder selected)" } else { &root_str }).weak())
                         .truncate(),
                 );
+
+                ui.separator();
+
+                if ui.button("🎮 Set Game Folder…").on_hover_text(
+                    "Point at your BG1:EE/BG2:EE install (the folder containing chitin.key) to show item/spell/class/race/kit names instead of raw codes."
+                ).clicked() {
+                    let mut dialog = rfd::FileDialog::new();
+                    if let Some(dir) = &self.game_root {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(folder) = dialog.pick_folder() {
+                        match GameData::load(&folder) {
+                            Ok(data) => {
+                                config::save_game_root(&folder);
+                                self.game_root = Some(folder);
+                                self.game_data = Some(Rc::new(data));
+                                self.status_msg = "Game data loaded.".to_owned();
+                            }
+                            Err(e) => self.status_msg = format!("Failed to load game folder: {e}"),
+                        }
+                    }
+                }
+                let game_str = self
+                    .game_root
+                    .as_deref()
+                    .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "(none — names shown as raw codes)".to_owned());
+                ui.add(egui::Label::new(egui::RichText::new(game_str).weak()).truncate());
 
                 ui.separator();
 
@@ -197,11 +240,12 @@ impl Bg2EditorApp {
             };
 
             let dirty = &mut self.is_dirty;
+            let gd = self.game_data.as_deref();
             ScrollArea::vertical().show(ui, |ui| match self.tab {
                 Tab::Abilities => tab_abilities(ui, cre, dirty),
-                Tab::ClassSkills => tab_class_skills(ui, cre, dirty),
-                Tab::Inventory => tab_inventory(ui, cre, dirty),
-                Tab::Spells => tab_spells(ui, cre, dirty),
+                Tab::ClassSkills => tab_class_skills(ui, cre, dirty, gd),
+                Tab::Inventory => tab_inventory(ui, cre, dirty, gd),
+                Tab::Spells => tab_spells(ui, cre, dirty, gd),
             });
         });
     }
@@ -317,7 +361,7 @@ fn tab_abilities(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
     });
 }
 
-fn tab_class_skills(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
+fn tab_class_skills(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameData>) {
     ui.columns(2, |cols| {
         egui::Grid::new("class_grid").num_columns(2).spacing([16.0, 6.0]).striped(true).show(&mut cols[0], |ui| {
             ui.heading("Class & Levels");
@@ -326,14 +370,14 @@ fn tab_class_skills(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
             drag_u8(ui, "Level (class 2)", &mut cre.level2, 0..=99, dirty);
             drag_u8(ui, "Level (class 3)", &mut cre.level3, 0..=99, dirty);
 
-            ui.heading("Class & Race (raw IDs — name lookup not implemented yet)");
+            ui.heading("Class & Race");
             ui.end_row();
-            drag_u8(ui, "Class (CLASS.IDS)", &mut cre.class, 0..=255, dirty);
-            drag_u8(ui, "Race (RACE.IDS)", &mut cre.race, 0..=255, dirty);
-            drag_u8(ui, "Gender (GENDER.IDS)", &mut cre.gender, 0..=255, dirty);
-            drag_u8(ui, "Alignment (ALIGNMEN.IDS)", &mut cre.alignment, 0..=255, dirty);
-            drag_u8(ui, "Allegiance (EA.IDS)", &mut cre.allegiance, 0..=255, dirty);
-            drag_u32(ui, "Kit (KIT.IDS)", &mut cre.kit, dirty);
+            ids_field_u8(ui, "Class", &mut cre.class, "CLASS.IDS", gd, dirty);
+            ids_field_u8(ui, "Race", &mut cre.race, "RACE.IDS", gd, dirty);
+            ids_field_u8(ui, "Gender", &mut cre.gender, "GENDER.IDS", gd, dirty);
+            ids_field_u8(ui, "Alignment", &mut cre.alignment, "ALIGNMEN.IDS", gd, dirty);
+            ids_field_u8(ui, "Allegiance", &mut cre.allegiance, "EA.IDS", gd, dirty);
+            ids_field_kit(ui, "Kit", &mut cre.kit, gd, dirty);
 
             ui.heading("Weapon Proficiencies (pips)");
             ui.end_row();
@@ -381,10 +425,75 @@ fn drag_prof(ui: &mut Ui, label: &str, prof: &mut crate::format::cre::ProfByte, 
     ui.end_row();
 }
 
-/// Edits a ResRef as an up-to-8-character text field. Resrefs have no
-/// friendly-name lookup yet (that needs the game-install resolver), so
-/// this is the raw resource code (e.g. `SW1H01`).
-fn edit_resref(ui: &mut Ui, resref: &mut ResRef, dirty: &mut bool, width: f32) {
+/// A dropdown of every symbol in `<ids_name>` (e.g. `"CLASS.IDS"`), when a
+/// game folder is set; otherwise a plain raw-number field. Ends the row.
+fn ids_field_u8(ui: &mut Ui, label: &str, value: &mut u8, ids_name: &str, gd: Option<&GameData>, dirty: &mut bool) {
+    ui.label(label);
+    if let Some(table) = gd.and_then(|gd| gd.ids(ids_name)) {
+        let current_label = table.name(*value as u32).map(|s| s.to_owned()).unwrap_or_else(|| format!("(unknown: {value})"));
+        let mut chosen = *value;
+        egui::ComboBox::from_id_salt((ids_name, label)).selected_text(current_label).show_ui(ui, |ui| {
+            for (val, name) in &table.entries {
+                if *val <= u8::MAX as u32 {
+                    ui.selectable_value(&mut chosen, *val as u8, name);
+                }
+            }
+        });
+        if chosen != *value {
+            *value = chosen;
+            *dirty = true;
+        }
+    } else {
+        let old = *value;
+        if ui.add(DragValue::new(value).range(0..=255u8)).changed() && *value != old {
+            *dirty = true;
+        }
+    }
+    ui.end_row();
+}
+
+/// Same as `ids_field_u8` but for the 32-bit KIT.IDS value, and always
+/// offers a synthetic "No Kit" (0) option since not every KIT.IDS
+/// explicitly defines a symbol for 0.
+fn ids_field_kit(ui: &mut Ui, label: &str, value: &mut u32, gd: Option<&GameData>, dirty: &mut bool) {
+    ui.label(label);
+    if let Some(table) = gd.and_then(|gd| gd.ids("KIT.IDS")) {
+        let current_label = if *value == 0 {
+            "No Kit".to_owned()
+        } else {
+            table.name(*value).map(|s| s.to_owned()).unwrap_or_else(|| format!("(unknown: {value:#06x})"))
+        };
+        let mut chosen = *value;
+        egui::ComboBox::from_id_salt("kit_combo").selected_text(current_label).show_ui(ui, |ui| {
+            ui.selectable_value(&mut chosen, 0u32, "No Kit");
+            for (val, name) in &table.entries {
+                ui.selectable_value(&mut chosen, *val, name);
+            }
+        });
+        if chosen != *value {
+            *value = chosen;
+            *dirty = true;
+        }
+    } else {
+        let old = *value;
+        if ui.add(DragValue::new(value)).changed() && *value != old {
+            *dirty = true;
+        }
+    }
+    ui.end_row();
+}
+
+/// Edits a ResRef as an up-to-8-character text field. When `resolver` is
+/// `Some`, also renders one more grid cell with the resolved display name
+/// (or "(unknown)"/blank) — callers must account for that extra column in
+/// their `Grid::num_columns` when a game folder is set.
+fn edit_resref(
+    ui: &mut Ui,
+    resref: &mut ResRef,
+    dirty: &mut bool,
+    width: f32,
+    resolver: Option<&dyn Fn(&str) -> Option<String>>,
+) {
     let mut s = resref.as_str();
     if ui.add(egui::TextEdit::singleline(&mut s).desired_width(width)).changed() {
         s.truncate(8);
@@ -392,6 +501,14 @@ fn edit_resref(ui: &mut Ui, resref: &mut ResRef, dirty: &mut bool, width: f32) {
         if new != *resref {
             *resref = new;
             *dirty = true;
+        }
+    }
+    if let Some(resolver) = resolver {
+        if resref.is_empty() {
+            ui.label("");
+        } else {
+            let label = resolver(&resref.as_str()).unwrap_or_else(|| "(unknown)".to_owned());
+            ui.label(egui::RichText::new(label).weak());
         }
     }
 }
@@ -419,8 +536,13 @@ fn spell_type_combo(ui: &mut Ui, kind: &mut u16, dirty: &mut bool, id: impl std:
     }
 }
 
-fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
+fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameData>) {
     let mut to_remove: Option<usize> = None;
+    // Built once so every row can cheaply copy an `Option<&dyn Fn>` rather
+    // than each constructing (and needing to outlive) its own closure.
+    let item_resolver_fn = gd.map(|gd| move |r: &str| gd.item_name(r));
+    let item_resolver: Option<&dyn Fn(&str) -> Option<String>> =
+        item_resolver_fn.as_ref().map(|f| f as &dyn Fn(&str) -> Option<String>);
 
     ui.columns(2, |cols| {
         egui::Grid::new("equip_grid").num_columns(2).spacing([12.0, 4.0]).striped(true).show(&mut cols[0], |ui| {
@@ -430,10 +552,17 @@ fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
             for i in 0..cre.item_slots.len() {
                 ui.label(ITEM_SLOT_NAMES[i]);
                 let current = cre.item_slots[i];
+                let item_label = |idx: usize, it: &InvItem| -> String {
+                    let resref = it.item.as_str();
+                    match gd.and_then(|gd| gd.item_name(&resref)) {
+                        Some(name) => format!("[{idx}] {resref} — {name}"),
+                        None => format!("[{idx}] {resref}"),
+                    }
+                };
                 let selected_text = if current < 0 {
                     "(empty)".to_owned()
                 } else if (current as usize) < item_count {
-                    format!("[{}] {}", current, cre.items[current as usize].item.as_str())
+                    item_label(current as usize, &cre.items[current as usize])
                 } else {
                     format!("(invalid index {current})")
                 };
@@ -441,7 +570,7 @@ fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
                 egui::ComboBox::from_id_salt(("equip_slot", i)).selected_text(selected_text).show_ui(ui, |ui| {
                     ui.selectable_value(&mut chosen, -1i16, "(empty)");
                     for (idx, it) in cre.items.iter().enumerate() {
-                        ui.selectable_value(&mut chosen, idx as i16, format!("[{idx}] {}", it.item.as_str()));
+                        ui.selectable_value(&mut chosen, idx as i16, item_label(idx, it));
                     }
                 });
                 if chosen != current {
@@ -458,10 +587,14 @@ fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
             cre.items.push(InvItem { item: ResRef::EMPTY, duration: 0, qty: [1, 0, 0], flags: 1 });
             *dirty = true;
         }
+        let num_cols = if gd.is_some() { 8 } else { 7 };
         ScrollArea::vertical().id_salt("items_scroll").max_height(520.0).show(&mut cols[1], |ui| {
-            egui::Grid::new("items_grid").num_columns(6).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
+            egui::Grid::new("items_grid").num_columns(num_cols).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
                 ui.strong("#");
                 ui.strong("Item");
+                if gd.is_some() {
+                    ui.strong("Name");
+                }
                 ui.strong("Qty 1");
                 ui.strong("Qty 2");
                 ui.strong("Qty 3");
@@ -470,7 +603,7 @@ fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
                 ui.end_row();
                 for i in 0..cre.items.len() {
                     ui.label(format!("{i}"));
-                    edit_resref(ui, &mut cre.items[i].item, dirty, 70.0);
+                    edit_resref(ui, &mut cre.items[i].item, dirty, 70.0, item_resolver);
                     drag_u16_inline(ui, &mut cre.items[i].qty[0], dirty);
                     drag_u16_inline(ui, &mut cre.items[i].qty[1], dirty);
                     drag_u16_inline(ui, &mut cre.items[i].qty[2], dirty);
@@ -507,8 +640,13 @@ enum SpellAction {
     RemoveMemorized(usize, usize),
 }
 
-fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
+fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameData>) {
     let mut action: Option<SpellAction> = None;
+    let spell_resolver_fn = gd.map(|gd| move |r: &str| gd.spell_name(r));
+    let spell_resolver: Option<&dyn Fn(&str) -> Option<String>> =
+        spell_resolver_fn.as_ref().map(|f| f as &dyn Fn(&str) -> Option<String>);
+    let known_cols = if gd.is_some() { 5 } else { 4 };
+    let mem_cols = if gd.is_some() { 6 } else { 5 };
 
     ui.columns(2, |cols| {
         cols[0].heading("Known Spells");
@@ -516,14 +654,17 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
             action = Some(SpellAction::AddKnown);
         }
         ScrollArea::vertical().id_salt("known_scroll").max_height(520.0).show(&mut cols[0], |ui| {
-            egui::Grid::new("known_grid").num_columns(4).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
+            egui::Grid::new("known_grid").num_columns(known_cols).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
                 ui.strong("Spell");
+                if gd.is_some() {
+                    ui.strong("Name");
+                }
                 ui.strong("Level");
                 ui.strong("Type");
                 ui.strong("");
                 ui.end_row();
                 for i in 0..cre.known_spells.len() {
-                    edit_resref(ui, &mut cre.known_spells[i].spell, dirty, 80.0);
+                    edit_resref(ui, &mut cre.known_spells[i].spell, dirty, 80.0, spell_resolver);
                     let mut lvl = cre.known_spells[i].level;
                     if ui.add(DragValue::new(&mut lvl).range(1..=9u16)).changed() {
                         cre.known_spells[i].level = lvl;
@@ -573,10 +714,10 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
 
                     let start = cre.mem_info[level_idx].table_index as usize;
                     let count = cre.mem_info[level_idx].count as usize;
-                    egui::Grid::new(("mem_grid", level_idx)).num_columns(5).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
+                    egui::Grid::new(("mem_grid", level_idx)).num_columns(mem_cols).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
                         for local_idx in 0..count {
                             let spell = &mut cre.memorized_spells[start + local_idx];
-                            edit_resref(ui, &mut spell.spell, dirty, 80.0);
+                            edit_resref(ui, &mut spell.spell, dirty, 80.0, spell_resolver);
                             let mut cast = spell.flags & 0b001 != 0;
                             let mut memorized = spell.flags & 0b010 != 0;
                             let mut disabled = spell.flags & 0b100 != 0;

@@ -13,13 +13,14 @@ The on-disk formats (GAM save file, embedded CRE creature structure) are reverse
   - **Class & Skills** — levels, weapon proficiency pips, thief skills.
   - **Inventory** — all 38 equipped slots (helmet/armor/weapons/rings/etc., picked from the character's item list) plus the full item list itself (add/remove, quantities/charges, identified flag).
   - **Spells** — known spells (add/remove) and memorized spells grouped by spell-level/class block (add/remove whole levels, add/remove/toggle individual memorized spells, edit max/current memorizable counts).
-  - Items and spells are currently edited by raw resource code (e.g. `SW1H01`, `SPWI112`) — no friendly-name picker yet, see "Not yet implemented" below.
+  - Items and spells are edited by raw resource code (e.g. `SW1H01`, `SPWI112`); the resolved display name is shown alongside once a game folder is set (see below).
 - Save writes back with an automatic `baldur.gam.bak` backup.
+- **Game-data name resolution** ("🎮 Set Game Folder…" in the toolbar, remembered across launches): reads `chitin.key` + the referenced `.bif` archives + `dialog.tlk` to resolve item/spell resrefs to their in-game names, and `.IDS` tables (`CLASS.IDS`, `RACE.IDS`, `GENDER.IDS`, `ALIGNMEN.IDS`, `EA.IDS`, `KIT.IDS`) to turn Class/Race/Gender/Alignment/Allegiance/Kit into searchable dropdowns instead of raw numeric IDs. Falls back to raw codes/numbers whenever no game folder is set (or a resref/ID isn't found — e.g. a modded item).
 
-**Validated against real save data** (three BG1:EE saves from an actual playthrough; one save has 1 party member + 36 embedded non-party creatures, each with their own spells/items): parsing, in-memory round trip, and the full load → edit → `save_with_backup` → reload write path all produce **byte-for-byte identical** output to the original `baldur.gam` aside from the intended edit. The inventory/spellbook mutation helpers (add/remove item, add/remove known spell, add/remove memorized spell, add/remove a whole spell-level block — each of which has to keep index/offset bookkeeping consistent across the CRE's variable-length sections) are also exercised against real save data. See `examples/inspect.rs` (read-only diagnostic), `examples/test_save.rs` (write path against a scratch copy), and `examples/test_mutations.rs` (inventory/spellbook mutations, read-only).
+**Validated against real save data and a real game install** (three BG1:EE saves from an actual playthrough, cross-checked against a real local BG1:EE `chitin.key`+`dialog.tlk`; one save has 1 party member + 36 embedded non-party creatures, each with their own spells/items): parsing, in-memory round trip, and the full load → edit → `save_with_backup` → reload write path all produce **byte-for-byte identical** output to the original `baldur.gam` aside from the intended edit. The inventory/spellbook mutation helpers (add/remove item, add/remove known spell, add/remove memorized spell, add/remove a whole spell-level block — each of which has to keep index/offset bookkeeping consistent across the CRE's variable-length sections) are also exercised against real save data. Name resolution was checked against a real character (a Cavalier Paladin) and correctly resolved every equipped item, known spell, and memorized spell, plus Class/Race/Gender/Alignment/Allegiance/Kit. See `examples/inspect.rs`, `examples/test_save.rs`, `examples/test_mutations.rs`, and `examples/test_gamedata.rs`.
 
 **Not yet implemented:**
-- Item/spell/class/kit/race/alignment name resolution from the game install (`chitin.key`/`.bif`/`dialog.tlk`/`.IDS`) — items and spells are edited by raw resource code, and class/race/kit/alignment are shown as raw numeric IDs on the Class & Skills tab rather than names.
+- A searchable item/spell *picker* (autocomplete over the full game catalog) — for now you type the resource code and the resolved name confirms it's right, rather than searching by name to find the code.
 
 ## Build
 
@@ -43,9 +44,10 @@ Runs structural round-trip tests (`parse(serialize(x)) == x`) for both the CRE a
 cargo run --example inspect -- "<save-folder>"
 cargo run --example test_save -- "<scratch-copy-of-a-save-folder>"
 cargo run --example test_mutations -- "<save-folder>"
+cargo run --example test_gamedata -- "<game-install-root>" "<save-folder>"
 ```
 
-`inspect` is read-only: loads a real save, prints key fields, and reports whether an in-memory serialize+reparse is byte-identical to the original file. `test_save` exercises the actual write path (edits a stat, calls `save_with_backup`, verifies the backup matches the pre-edit original and the reload picks up the edit) — always run it against a scratch copy, never a save folder you care about. `test_mutations` is read-only: runs the inventory/spellbook add/remove helpers against a real character and checks the result still round-trips consistently.
+`inspect` is read-only: loads a real save, prints key fields, and reports whether an in-memory serialize+reparse is byte-identical to the original file. `test_save` exercises the actual write path (edits a stat, calls `save_with_backup`, verifies the backup matches the pre-edit original and the reload picks up the edit) — always run it against a scratch copy, never a save folder you care about. `test_mutations` is read-only: runs the inventory/spellbook add/remove helpers against a real character and checks the result still round-trips consistently. `test_gamedata` is read-only: loads a real game install's `chitin.key`/`dialog.tlk` and resolves every item/spell/class/race/alignment/kit for a real character.
 
 Not yet verified: loading an edited save back into the actual game.
 
@@ -55,12 +57,18 @@ Not yet verified: loading an edited save back into the actual game.
 src/
   main.rs        — eframe entry point
   app.rs         — egui UI: toolbar, save list, per-character tabs
-  save_file.rs    — save-folder discovery, load/save with backup
+  config.rs       — remembers the last-used game install folder across launches
+  save_file.rs     — save-folder discovery, load/save with backup
   format/
     primitives.rs — LE read/write helpers, ResRef, Writer
     gam.rs         — GAM V2.0 file: header, party/non-party members, globals, journal, familiar, stored locations
     cre.rs         — embedded CRE V1.0 creature structure: attributes, proficiencies, inventory, spellbook
-  gamedata/        — (stub) game-install resource resolver for item/spell/enum names, not yet implemented
+  gamedata/
+    key.rs         — chitin.key: BIFF-entry table, resource-entry table, locator bit-packing
+    bif.rs         — .bif archives: plain BIFFV1, whole-file-compressed BIF V1.0, block-compressed BIFCV1.0
+    tlk.rs          — dialog.tlk string table (strref -> text)
+    ids.rs          — .IDS symbol table text format (CLASS.IDS, RACE.IDS, etc.)
+    mod.rs           — GameData: ties the above together into item/spell/IDS name resolution, with caching
 ```
 
 ## Binary format notes
