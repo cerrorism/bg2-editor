@@ -14,6 +14,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::format::primitives::read_u32;
 use bif::BifArchive;
@@ -21,13 +22,19 @@ use ids::IdsTable;
 use key::KeyFile;
 use tlk::TlkFile;
 
+/// A (resref, display name) list for a full resource-type catalog (every
+/// item or every spell in the game), sorted by name.
+pub type Catalog = Rc<Vec<(String, String)>>;
+
 pub struct GameData {
     root: PathBuf,
     key: KeyFile,
     tlk: TlkFile,
     bif_archives: RefCell<HashMap<u32, BifArchive>>,
-    ids_cache: RefCell<HashMap<String, std::rc::Rc<IdsTable>>>,
+    ids_cache: RefCell<HashMap<String, Rc<IdsTable>>>,
     name_cache: RefCell<HashMap<(String, u16), Option<String>>>,
+    item_catalog: RefCell<Option<Catalog>>,
+    spell_catalog: RefCell<Option<Catalog>>,
 }
 
 impl GameData {
@@ -50,6 +57,8 @@ impl GameData {
             bif_archives: RefCell::new(HashMap::new()),
             ids_cache: RefCell::new(HashMap::new()),
             name_cache: RefCell::new(HashMap::new()),
+            item_catalog: RefCell::new(None),
+            spell_catalog: RefCell::new(None),
         })
     }
 
@@ -125,6 +134,48 @@ impl GameData {
     /// falling back to the raw number if the table or value isn't found.
     pub fn ids_label(&self, ids_name: &str, value: u32) -> String {
         self.ids(ids_name).and_then(|t| t.name(value).map(|s| s.to_string())).unwrap_or_else(|| value.to_string())
+    }
+
+    /// Every item in the game as (resref, name), sorted by name. Built
+    /// (and cached) on first call — resolves every ITM in the KEY index,
+    /// so this can take a moment the first time it's needed.
+    pub fn item_catalog(&self) -> Catalog {
+        self.catalog(&self.item_catalog, key::TYPE_ITM, |gd, r| gd.item_name(r))
+    }
+
+    /// Every spell in the game as (resref, name), sorted by name.
+    pub fn spell_catalog(&self) -> Catalog {
+        self.catalog(&self.spell_catalog, key::TYPE_SPL, |gd, r| gd.spell_name(r))
+    }
+
+    fn catalog(
+        &self,
+        cache: &RefCell<Option<Catalog>>,
+        restype: u16,
+        resolve: impl Fn(&GameData, &str) -> Option<String>,
+    ) -> Catalog {
+        if let Some(c) = cache.borrow().as_ref() {
+            return c.clone();
+        }
+        let mut list: Vec<(String, String)> = self
+            .key
+            .names_of_type(restype)
+            .filter_map(|entry| {
+                let resref = entry.name.as_str();
+                let name = resolve(self, &resref)?;
+                // Some internal/unused stub records resolve to literal
+                // placeholder text rather than a real name — not
+                // something a player should ever pick from a catalog.
+                if name.trim().is_empty() || name.trim().eq_ignore_ascii_case("<NO TEXT>") {
+                    return None;
+                }
+                Some((resref, name))
+            })
+            .collect();
+        list.sort_by(|a, b| a.1.cmp(&b.1));
+        let rc: Catalog = Rc::new(list);
+        *cache.borrow_mut() = Some(rc.clone());
+        rc
     }
 }
 

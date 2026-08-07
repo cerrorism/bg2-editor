@@ -54,4 +54,27 @@ fn main() {
     // to make sure IDS parsing isn't accidentally empty.
     let class_table = data.ids("CLASS.IDS").expect("CLASS.IDS should resolve");
     println!("\nCLASS.IDS entries loaded: {}", class_table.entries.len());
+
+    let t0 = std::time::Instant::now();
+    let items = data.item_catalog();
+    let item_elapsed = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let spells = data.spell_catalog();
+    let spell_elapsed = t1.elapsed();
+    println!(
+        "\nItem catalog: {} entries in {:?}. Spell catalog: {} entries in {:?}.",
+        items.len(), item_elapsed, spells.len(), spell_elapsed
+    );
+    println!("First 5 items alphabetically:");
+    for (rr, name) in items.iter().take(5) {
+        println!("  {rr:8} {name}");
+    }
+    println!("First 5 spells alphabetically:");
+    for (rr, name) in spells.iter().take(5) {
+        println!("  {rr:8} {name}");
+    }
+    // Cache should make the second call effectively instant.
+    let t2 = std::time::Instant::now();
+    let _ = data.item_catalog();
+    println!("Second item_catalog() call (cached): {:?}", t2.elapsed());
 }

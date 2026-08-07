@@ -483,17 +483,39 @@ fn ids_field_kit(ui: &mut Ui, label: &str, value: &mut u32, gd: Option<&GameData
     ui.end_row();
 }
 
-/// Edits a ResRef as an up-to-8-character text field. When `resolver` is
-/// `Some`, also renders one more grid cell with the resolved display name
-/// (or "(unknown)"/blank) — callers must account for that extra column in
-/// their `Grid::num_columns` when a game folder is set.
-fn edit_resref(
-    ui: &mut Ui,
-    resref: &mut ResRef,
-    dirty: &mut bool,
-    width: f32,
-    resolver: Option<&dyn Fn(&str) -> Option<String>>,
-) {
+#[derive(Clone, Copy)]
+enum CatalogKind {
+    Item,
+    Spell,
+}
+
+impl CatalogKind {
+    fn name(&self, gd: &GameData, resref: &str) -> Option<String> {
+        match self {
+            CatalogKind::Item => gd.item_name(resref),
+            CatalogKind::Spell => gd.spell_name(resref),
+        }
+    }
+    fn catalog(&self, gd: &GameData) -> crate::gamedata::Catalog {
+        match self {
+            CatalogKind::Item => gd.item_catalog(),
+            CatalogKind::Spell => gd.spell_catalog(),
+        }
+    }
+    fn window_title(&self) -> &'static str {
+        match self {
+            CatalogKind::Item => "Pick an Item",
+            CatalogKind::Spell => "Pick a Spell",
+        }
+    }
+}
+
+/// Edits a ResRef as an up-to-8-character text field. When `gd` is
+/// `Some`, also renders one more grid cell containing the resolved
+/// display name plus a "🔍" search-by-name picker button — callers must
+/// account for that extra column in their `Grid::num_columns` when a game
+/// folder is set.
+fn edit_resref(ui: &mut Ui, id: egui::Id, resref: &mut ResRef, dirty: &mut bool, width: f32, gd: Option<&GameData>, kind: CatalogKind) {
     let mut s = resref.as_str();
     if ui.add(egui::TextEdit::singleline(&mut s).desired_width(width)).changed() {
         s.truncate(8);
@@ -503,14 +525,76 @@ fn edit_resref(
             *dirty = true;
         }
     }
-    if let Some(resolver) = resolver {
-        if resref.is_empty() {
-            ui.label("");
-        } else {
-            let label = resolver(&resref.as_str()).unwrap_or_else(|| "(unknown)".to_owned());
-            ui.label(egui::RichText::new(label).weak());
-        }
+    if let Some(gd) = gd {
+        ui.horizontal(|ui| {
+            if !resref.is_empty() {
+                let label = kind.name(gd, &resref.as_str()).unwrap_or_else(|| "(unknown)".to_owned());
+                ui.label(egui::RichText::new(label).weak());
+            }
+            let mut picked = None;
+            picker_button(ui, id, "🔍", gd, kind, |rr| picked = Some(rr));
+            if let Some(rr) = picked {
+                *resref = rr;
+                *dirty = true;
+            }
+        });
     }
+}
+
+/// Renders a button that opens a searchable popup window listing every
+/// entry in `kind`'s catalog (filtered live by a search box); calls
+/// `on_select` once when the user clicks a result. Open/closed state and
+/// the search query persist in egui's own per-`id` memory, so this needs
+/// no state in `Bg2EditorApp` and multiple pickers on screen at once
+/// (one per row) don't interfere with each other.
+fn picker_button(ui: &mut Ui, id: egui::Id, button_label: &str, gd: &GameData, kind: CatalogKind, mut on_select: impl FnMut(ResRef)) {
+    let open_id = id.with("picker_open");
+    let query_id = id.with("picker_query");
+
+    if ui.button(button_label).clicked() {
+        ui.memory_mut(|m| m.data.insert_temp(open_id, true));
+    }
+    let is_open = ui.memory(|m| m.data.get_temp::<bool>(open_id).unwrap_or(false));
+    if !is_open {
+        return;
+    }
+
+    let mut query: String = ui.memory(|m| m.data.get_temp::<String>(query_id)).unwrap_or_default();
+    let mut still_open = true;
+    let mut picked: Option<ResRef> = None;
+    egui::Window::new(kind.window_title())
+        .id(id.with("picker_window"))
+        .open(&mut still_open)
+        .default_width(420.0)
+        .default_height(480.0)
+        .show(ui.ctx(), |ui| {
+            ui.add(egui::TextEdit::singleline(&mut query).hint_text("Search by name or code…"));
+            ui.separator();
+            let catalog = kind.catalog(gd);
+            let q = query.to_ascii_lowercase();
+            ScrollArea::vertical().show(ui, |ui| {
+                let mut shown = 0usize;
+                for (rr, name) in catalog.iter() {
+                    if !q.is_empty() && !name.to_ascii_lowercase().contains(&q) && !rr.to_ascii_lowercase().contains(&q) {
+                        continue;
+                    }
+                    if ui.selectable_label(false, format!("{name}  [{rr}]")).clicked() {
+                        picked = Some(ResRef::from_str(rr));
+                    }
+                    shown += 1;
+                    if shown >= 300 {
+                        ui.weak("(more than 300 matches — keep typing to narrow it down)");
+                        break;
+                    }
+                }
+            });
+        });
+    ui.memory_mut(|m| m.data.insert_temp(query_id, query));
+    if let Some(rr) = picked {
+        on_select(rr);
+        still_open = false;
+    }
+    ui.memory_mut(|m| m.data.insert_temp(open_id, still_open));
 }
 
 fn drag_u16_inline(ui: &mut Ui, value: &mut u16, dirty: &mut bool) {
@@ -538,11 +622,6 @@ fn spell_type_combo(ui: &mut Ui, kind: &mut u16, dirty: &mut bool, id: impl std:
 
 fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameData>) {
     let mut to_remove: Option<usize> = None;
-    // Built once so every row can cheaply copy an `Option<&dyn Fn>` rather
-    // than each constructing (and needing to outlive) its own closure.
-    let item_resolver_fn = gd.map(|gd| move |r: &str| gd.item_name(r));
-    let item_resolver: Option<&dyn Fn(&str) -> Option<String>> =
-        item_resolver_fn.as_ref().map(|f| f as &dyn Fn(&str) -> Option<String>);
 
     ui.columns(2, |cols| {
         egui::Grid::new("equip_grid").num_columns(2).spacing([12.0, 4.0]).striped(true).show(&mut cols[0], |ui| {
@@ -583,10 +662,20 @@ fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&Gam
 
         cols[1].heading("All Items");
         cols[1].label(egui::RichText::new("Includes equipped items; slots on the left reference these by index.").small().weak());
-        if cols[1].button("+ Add Item").clicked() {
-            cre.items.push(InvItem { item: ResRef::EMPTY, duration: 0, qty: [1, 0, 0], flags: 1 });
-            *dirty = true;
-        }
+        cols[1].horizontal(|ui| {
+            if ui.button("+ Add Blank Item").clicked() {
+                cre.items.push(InvItem { item: ResRef::EMPTY, duration: 0, qty: [1, 0, 0], flags: 1 });
+                *dirty = true;
+            }
+            if let Some(gd) = gd {
+                let mut picked = None;
+                picker_button(ui, ui.id().with("add_item"), "🔍 Add via Search", gd, CatalogKind::Item, |rr| picked = Some(rr));
+                if let Some(rr) = picked {
+                    cre.items.push(InvItem { item: rr, duration: 0, qty: [1, 0, 0], flags: 1 });
+                    *dirty = true;
+                }
+            }
+        });
         let num_cols = if gd.is_some() { 8 } else { 7 };
         ScrollArea::vertical().id_salt("items_scroll").max_height(520.0).show(&mut cols[1], |ui| {
             egui::Grid::new("items_grid").num_columns(num_cols).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
@@ -603,7 +692,8 @@ fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&Gam
                 ui.end_row();
                 for i in 0..cre.items.len() {
                     ui.label(format!("{i}"));
-                    edit_resref(ui, &mut cre.items[i].item, dirty, 70.0, item_resolver);
+                    let row_id = ui.id().with(("item_row", i));
+                    edit_resref(ui, row_id, &mut cre.items[i].item, dirty, 70.0, gd, CatalogKind::Item);
                     drag_u16_inline(ui, &mut cre.items[i].qty[0], dirty);
                     drag_u16_inline(ui, &mut cre.items[i].qty[1], dirty);
                     drag_u16_inline(ui, &mut cre.items[i].qty[2], dirty);
@@ -633,26 +723,32 @@ fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&Gam
 
 enum SpellAction {
     RemoveKnown(usize),
-    AddKnown,
+    AddKnown(ResRef),
     AddLevel,
     RemoveLevel(usize),
-    AddMemorized(usize),
+    AddMemorized(usize, ResRef),
     RemoveMemorized(usize, usize),
 }
 
 fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameData>) {
     let mut action: Option<SpellAction> = None;
-    let spell_resolver_fn = gd.map(|gd| move |r: &str| gd.spell_name(r));
-    let spell_resolver: Option<&dyn Fn(&str) -> Option<String>> =
-        spell_resolver_fn.as_ref().map(|f| f as &dyn Fn(&str) -> Option<String>);
     let known_cols = if gd.is_some() { 5 } else { 4 };
     let mem_cols = if gd.is_some() { 6 } else { 5 };
 
     ui.columns(2, |cols| {
         cols[0].heading("Known Spells");
-        if cols[0].button("+ Add Known Spell").clicked() {
-            action = Some(SpellAction::AddKnown);
-        }
+        cols[0].horizontal(|ui| {
+            if ui.button("+ Add Blank").clicked() {
+                action = Some(SpellAction::AddKnown(ResRef::EMPTY));
+            }
+            if let Some(gd) = gd {
+                let mut picked = None;
+                picker_button(ui, ui.id().with("add_known"), "🔍 Add via Search", gd, CatalogKind::Spell, |rr| picked = Some(rr));
+                if let Some(rr) = picked {
+                    action = Some(SpellAction::AddKnown(rr));
+                }
+            }
+        });
         ScrollArea::vertical().id_salt("known_scroll").max_height(520.0).show(&mut cols[0], |ui| {
             egui::Grid::new("known_grid").num_columns(known_cols).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
                 ui.strong("Spell");
@@ -664,7 +760,8 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
                 ui.strong("");
                 ui.end_row();
                 for i in 0..cre.known_spells.len() {
-                    edit_resref(ui, &mut cre.known_spells[i].spell, dirty, 80.0, spell_resolver);
+                    let row_id = ui.id().with(("known_row", i));
+                    edit_resref(ui, row_id, &mut cre.known_spells[i].spell, dirty, 80.0, gd, CatalogKind::Spell);
                     let mut lvl = cre.known_spells[i].level;
                     if ui.add(DragValue::new(&mut lvl).range(1..=9u16)).changed() {
                         cre.known_spells[i].level = lvl;
@@ -716,8 +813,9 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
                     let count = cre.mem_info[level_idx].count as usize;
                     egui::Grid::new(("mem_grid", level_idx)).num_columns(mem_cols).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
                         for local_idx in 0..count {
+                            let row_id = ui.id().with(("mem_row", level_idx, local_idx));
                             let spell = &mut cre.memorized_spells[start + local_idx];
-                            edit_resref(ui, &mut spell.spell, dirty, 80.0, spell_resolver);
+                            edit_resref(ui, row_id, &mut spell.spell, dirty, 80.0, gd, CatalogKind::Spell);
                             let mut cast = spell.flags & 0b001 != 0;
                             let mut memorized = spell.flags & 0b010 != 0;
                             let mut disabled = spell.flags & 0b100 != 0;
@@ -734,9 +832,18 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
                             ui.end_row();
                         }
                     });
-                    if ui.button("+ Add Spell to This Level").clicked() {
-                        action = Some(SpellAction::AddMemorized(level_idx));
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("+ Add Blank Spell").clicked() {
+                            action = Some(SpellAction::AddMemorized(level_idx, ResRef::EMPTY));
+                        }
+                        if let Some(gd) = gd {
+                            let mut picked = None;
+                            picker_button(ui, ui.id().with(("add_mem", level_idx)), "🔍 Add via Search", gd, CatalogKind::Spell, |rr| picked = Some(rr));
+                            if let Some(rr) = picked {
+                                action = Some(SpellAction::AddMemorized(level_idx, rr));
+                            }
+                        }
+                    });
                 });
             }
         });
@@ -747,8 +854,8 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
             cre.known_spells.remove(i);
             *dirty = true;
         }
-        Some(SpellAction::AddKnown) => {
-            cre.known_spells.push(KnownSpell { spell: ResRef::EMPTY, level: 1, kind: 1 });
+        Some(SpellAction::AddKnown(spell)) => {
+            cre.known_spells.push(KnownSpell { spell, level: 1, kind: 1 });
             *dirty = true;
         }
         Some(SpellAction::AddLevel) => {
@@ -759,8 +866,8 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
             cre.remove_mem_level(i);
             *dirty = true;
         }
-        Some(SpellAction::AddMemorized(level_idx)) => {
-            cre.add_memorized_spell(level_idx, MemorizedSpell { spell: ResRef::EMPTY, flags: 0b010 });
+        Some(SpellAction::AddMemorized(level_idx, spell)) => {
+            cre.add_memorized_spell(level_idx, MemorizedSpell { spell, flags: 0b010 });
             *dirty = true;
         }
         Some(SpellAction::RemoveMemorized(level_idx, local_idx)) => {
