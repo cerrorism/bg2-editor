@@ -17,6 +17,12 @@ egui = "0.31"
 rfd = "0.15"
 flate2 = "1"
 
+[dev-dependencies]
+# Same font-parsing crate egui/epaint uses internally, pinned to match —
+# used only by examples/test_fonts.rs to verify a loaded system font
+# actually contains the glyphs we need, rather than assuming it does.
+ab_glyph = "0.2.32"
+
 [profile.release]
 opt-level = 3
 lto = true

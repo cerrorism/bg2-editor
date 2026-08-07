@@ -40,6 +40,16 @@ fn main() {
                     cre.level1, cre.level2, cre.level3, cre.class, cre.race, cre.alignment, cre.kit,
                     cre.xp, cre.gold, cre.known_spells.len(), cre.mem_info.len(), cre.memorized_spells.len(), cre.items.len()
                 );
+                println!(
+                    "    profs raw bytes: large_sword={:#010b} small_sword={:#010b} bow={:#010b} spear={:#010b} blunt={:#010b} spiked={:#010b} axe={:#010b} missile={:#010b}",
+                    cre.prof_large_sword.0, cre.prof_small_sword.0, cre.prof_bow.0, cre.prof_spear.0,
+                    cre.prof_blunt.0, cre.prof_spiked.0, cre.prof_axe.0, cre.prof_missile.0
+                );
+                println!(
+                    "    profs rank (low 3 bits): large_sword={} small_sword={} bow={} spear={} blunt={} spiked={} axe={} missile={}",
+                    cre.prof_large_sword.rank(), cre.prof_small_sword.rank(), cre.prof_bow.rank(), cre.prof_spear.rank(),
+                    cre.prof_blunt.rank(), cre.prof_spiked.rank(), cre.prof_axe.rank(), cre.prof_missile.rank()
+                );
             }
             None => println!("(external CRE reference, not embedded)"),
         }

@@ -21,8 +21,13 @@ The on-disk formats (GAM save file, embedded CRE creature structure) are reverse
 
 The item/spell picker itself (the popup window, search box, click-to-select) is standard native-GUI interaction that couldn't be scripted/automated the way the rest of this was verified — it compiles cleanly, reuses the same catalog-building logic already validated above, and the app launches/runs without error, but hasn't been click-tested by hand yet.
 
+**Also fixed, from real user-reported issues:**
+- **CJK text rendering** — egui's bundled fonts only cover Latin script, so a Chinese party member name rendered as empty boxes. `src/fonts.rs` now loads a system CJK font (e.g. Microsoft YaHei) as a fallback if one is found. Verified with `ab_glyph` (the same font-parsing crate egui uses internally) that the font it picks actually contains glyphs for a real Chinese name from a real save — see `examples/test_fonts.rs`.
+- **Folder persistence** — both the save folder and game folder are now remembered across launches (previously only the game folder was), and the auto-detect for the default save folder now also checks OneDrive-redirected `Documents` folders, not just the plain one.
+- **A real, confirmed data-corruption bug** — several `DragValue` widgets used a `.range()` narrower than the field's legitimate values (e.g. spell level `1..=9` when `0` is a valid real placeholder; per-creature reputation `0..=20` when real data can be up to 255). egui's `DragValue` silently clamps an out-of-range *pre-existing* value into range the moment it's rendered, with no user interaction needed — so just opening the Spells tab flipped every unused "level 0" slot to "level 1" (including one *active* slot holding 7 real memorized spells) and clamped a reputation value of 120 down to 20. This is almost certainly what crashed the game on load. Confirmed via byte-level diffing of the user's actual save file across two edits, then reproduced and fixed at the widget level in `examples/test_dragvalue_fix.rs` (headlessly renders the exact widgets with the exact real values and asserts they survive unchanged). While fixing this, also corrected several fields' signedness (resistances, saves, THAC0, luck, turn-undead-level were typed `u8` but are actually signed `i8` in the format — meaning e.g. a vulnerability's legitimately-negative resistance would have been misread *and* then clamped into a positive range by the same bug). All numeric ranges in the UI are now either the field's true full native range, or a closed enum's exact valid set (e.g. attacks/round) — never a "typical gameplay value" guess.
+
 **Not yet implemented:**
-- Nothing on the original request list — attributes, inventory, spellbook, and name resolution (including a picker) are all in place. Possible next steps: verifying an edited save actually loads in-game, and BG2:EE-specific validation (everything so far has been tested against BG1:EE, since that's the save data available).
+- Nothing on the original request list — attributes, inventory, spellbook, and name resolution (including a picker) are all in place. Possible next steps: verifying an edited save actually loads in-game now that the corruption bug is fixed, and BG2:EE-specific validation (everything so far has been tested against BG1:EE, since that's the save data available).
 
 ## Build
 
@@ -47,9 +52,13 @@ cargo run --example inspect -- "<save-folder>"
 cargo run --example test_save -- "<scratch-copy-of-a-save-folder>"
 cargo run --example test_mutations -- "<save-folder>"
 cargo run --example test_gamedata -- "<game-install-root>" "<save-folder>"
+cargo run --example test_fonts
+cargo run --example test_dragvalue_fix
+cargo run --example diff_gam -- "<a.gam>" "<b.gam>"
+cargo run --example dump_cre -- "<save-folder>"
 ```
 
-`inspect` is read-only: loads a real save, prints key fields, and reports whether an in-memory serialize+reparse is byte-identical to the original file. `test_save` exercises the actual write path (edits a stat, calls `save_with_backup`, verifies the backup matches the pre-edit original and the reload picks up the edit) — always run it against a scratch copy, never a save folder you care about. `test_mutations` is read-only: runs the inventory/spellbook add/remove helpers against a real character and checks the result still round-trips consistently. `test_gamedata` is read-only: loads a real game install's `chitin.key`/`dialog.tlk` and resolves every item/spell/class/race/alignment/kit for a real character.
+`inspect` is read-only: loads a real save, prints key fields, and reports whether an in-memory serialize+reparse is byte-identical to the original file. `test_save` exercises the actual write path (edits a stat, calls `save_with_backup`, verifies the backup matches the pre-edit original and the reload picks up the edit) — always run it against a scratch copy, never a save folder you care about. `test_mutations` is read-only: runs the inventory/spellbook add/remove helpers against a real character and checks the result still round-trips consistently. `test_gamedata` is read-only: loads a real game install's `chitin.key`/`dialog.tlk` and resolves every item/spell/class/race/alignment/kit for a real character. `test_fonts` checks the system CJK font `fonts::setup` would pick actually contains the needed glyphs. `test_dragvalue_fix` headlessly reproduces (and verifies the fix for) the DragValue range-clamping corruption bug described above. `diff_gam`/`dump_cre` are read-only ad-hoc diagnostics used to investigate that bug — a byte-level diff between two `.gam` files, and a full field dump of a save's first party member.
 
 Not yet verified: loading an edited save back into the actual game, and hands-on testing of the item/spell picker popup itself.
 

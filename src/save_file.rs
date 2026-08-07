@@ -23,21 +23,37 @@ pub fn list_save_folders(root: &Path) -> Vec<PathBuf> {
     folders.into_iter().map(|(p, _)| p).collect()
 }
 
-/// The default save-folder locations for BG1:EE and BG2:EE under the
-/// user's Documents folder, in the order they should be tried.
+/// The default save-folder locations for BG1:EE and BG2:EE, in the order
+/// they should be tried. Checks both a plain `Documents` folder and
+/// OneDrive-redirected `Documents` (a common Windows setup where
+/// `USERPROFILE\Documents` isn't where Documents actually lives).
 pub fn default_save_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Some(docs) = dirs_documents() {
+    for docs in dirs_documents_candidates() {
         roots.push(docs.join("Baldur's Gate II - Enhanced Edition").join("save"));
         roots.push(docs.join("Baldur's Gate - Enhanced Edition").join("save"));
     }
     roots
 }
 
-fn dirs_documents() -> Option<PathBuf> {
-    // Avoid pulling in a directories crate for one lookup: on Windows this
-    // is USERPROFILE\Documents.
-    std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("Documents"))
+fn dirs_documents_candidates() -> Vec<PathBuf> {
+    let Some(profile) = std::env::var_os("USERPROFILE").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    let mut candidates = vec![profile.join("Documents")];
+    // OneDrive can redirect Documents; "OneDrive" is the default folder
+    // name, but a custom account name (e.g. "OneDrive - Company") is also
+    // common, so check every OneDrive* folder directly under the profile.
+    if let Ok(entries) = fs::read_dir(&profile) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("OneDrive") {
+                candidates.push(entry.path().join("Documents"));
+            }
+        }
+    }
+    candidates
 }
 
 pub fn load(save_folder: &Path) -> Result<GamFile, String> {

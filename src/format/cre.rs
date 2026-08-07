@@ -112,8 +112,12 @@ pub struct CreV1 {
     // --- core attributes (editable) ---
     pub xp: u32,
     pub gold: u32,
-    pub hp_current: u16,
-    pub hp_max: u16,
+    pub hp_current: i16,
+    pub hp_max: i16,
+    /// Per-creature reputation byte — not the same as party reputation
+    /// (a separate GAM-level field); observed values in the wild go well
+    /// past the nominal 0-20 in-game reputation display range, so this is
+    /// treated as a plain unsigned byte rather than clamped to 0-20.
     pub reputation: u8,
     pub ac_natural: i16,
     pub ac_effective: i16,
@@ -121,24 +125,26 @@ pub struct CreV1 {
     pub ac_mod_missile: i16,
     pub ac_mod_piercing: i16,
     pub ac_mod_slashing: i16,
-    pub thac0: u8,
+    pub thac0: i8,
     pub attacks_per_round: u8,
-    pub save_death: u8,
-    pub save_wand: u8,
-    pub save_polymorph: u8,
-    pub save_breath: u8,
-    pub save_spell: u8,
-    pub resist_fire: u8,
-    pub resist_cold: u8,
-    pub resist_electricity: u8,
-    pub resist_acid: u8,
-    pub resist_magic: u8,
-    pub resist_magic_fire: u8,
-    pub resist_magic_cold: u8,
-    pub resist_slashing: u8,
-    pub resist_crushing: u8,
-    pub resist_piercing: u8,
-    pub resist_missile: u8,
+    pub save_death: i8,
+    pub save_wand: i8,
+    pub save_polymorph: i8,
+    pub save_breath: i8,
+    pub save_spell: i8,
+    /// Signed: vulnerability (extra damage taken) is a real, legitimate
+    /// negative resistance value, not just a display artifact.
+    pub resist_fire: i8,
+    pub resist_cold: i8,
+    pub resist_electricity: i8,
+    pub resist_acid: i8,
+    pub resist_magic: i8,
+    pub resist_magic_fire: i8,
+    pub resist_magic_cold: i8,
+    pub resist_slashing: i8,
+    pub resist_crushing: i8,
+    pub resist_piercing: i8,
+    pub resist_missile: i8,
     pub hide_in_shadows: u8,
     pub detect_illusion: u8,
     pub set_traps: u8,
@@ -147,7 +153,8 @@ pub struct CreV1 {
     pub move_silently: u8,
     pub find_traps: u8,
     pub pick_pockets: u8,
-    pub luck: u8,
+    /// Signed: curse effects can legitimately drive this negative.
+    pub luck: i8,
     pub prof_large_sword: ProfByte,
     pub prof_small_sword: ProfByte,
     pub prof_bow: ProfByte,
@@ -162,7 +169,7 @@ pub struct CreV1 {
     pub reputation_mod_killed: i8,
     pub reputation_mod_join: i8,
     pub reputation_mod_leave: i8,
-    pub turn_undead_level: u8,
+    pub turn_undead_level: i8,
     pub level1: u8,
     pub level2: u8,
     pub level3: u8,
@@ -341,8 +348,8 @@ impl CreV1 {
 
             xp: read_u32(buf, b + 16),
             gold: read_u32(buf, b + 20),
-            hp_current: read_u16(buf, b + 28),
-            hp_max: read_u16(buf, b + 30),
+            hp_current: read_i16(buf, b + 28),
+            hp_max: read_i16(buf, b + 30),
             reputation: read_u8(buf, b + 60),
             ac_natural: read_i16(buf, b + 62),
             ac_effective: read_i16(buf, b + 64),
@@ -350,24 +357,24 @@ impl CreV1 {
             ac_mod_missile: read_i16(buf, b + 68),
             ac_mod_piercing: read_i16(buf, b + 70),
             ac_mod_slashing: read_i16(buf, b + 72),
-            thac0: read_u8(buf, b + 74),
+            thac0: read_i8(buf, b + 74),
             attacks_per_round: read_u8(buf, b + 75),
-            save_death: read_u8(buf, b + 76),
-            save_wand: read_u8(buf, b + 77),
-            save_polymorph: read_u8(buf, b + 78),
-            save_breath: read_u8(buf, b + 79),
-            save_spell: read_u8(buf, b + 80),
-            resist_fire: read_u8(buf, b + 81),
-            resist_cold: read_u8(buf, b + 82),
-            resist_electricity: read_u8(buf, b + 83),
-            resist_acid: read_u8(buf, b + 84),
-            resist_magic: read_u8(buf, b + 85),
-            resist_magic_fire: read_u8(buf, b + 86),
-            resist_magic_cold: read_u8(buf, b + 87),
-            resist_slashing: read_u8(buf, b + 88),
-            resist_crushing: read_u8(buf, b + 89),
-            resist_piercing: read_u8(buf, b + 90),
-            resist_missile: read_u8(buf, b + 91),
+            save_death: read_i8(buf, b + 76),
+            save_wand: read_i8(buf, b + 77),
+            save_polymorph: read_i8(buf, b + 78),
+            save_breath: read_i8(buf, b + 79),
+            save_spell: read_i8(buf, b + 80),
+            resist_fire: read_i8(buf, b + 81),
+            resist_cold: read_i8(buf, b + 82),
+            resist_electricity: read_i8(buf, b + 83),
+            resist_acid: read_i8(buf, b + 84),
+            resist_magic: read_i8(buf, b + 85),
+            resist_magic_fire: read_i8(buf, b + 86),
+            resist_magic_cold: read_i8(buf, b + 87),
+            resist_slashing: read_i8(buf, b + 88),
+            resist_crushing: read_i8(buf, b + 89),
+            resist_piercing: read_i8(buf, b + 90),
+            resist_missile: read_i8(buf, b + 91),
             hide_in_shadows: read_u8(buf, b + 61),
             detect_illusion: read_u8(buf, b + 92),
             set_traps: read_u8(buf, b + 93),
@@ -376,7 +383,7 @@ impl CreV1 {
             move_silently: read_u8(buf, b + 96),
             find_traps: read_u8(buf, b + 97),
             pick_pockets: read_u8(buf, b + 98),
-            luck: read_u8(buf, b + 101),
+            luck: read_i8(buf, b + 101),
             prof_large_sword: ProfByte(read_u8(buf, b + 102)),
             prof_small_sword: ProfByte(read_u8(buf, b + 103)),
             prof_bow: ProfByte(read_u8(buf, b + 104)),
@@ -391,7 +398,7 @@ impl CreV1 {
             reputation_mod_killed: read_i8(buf, b + 119),
             reputation_mod_join: read_i8(buf, b + 120),
             reputation_mod_leave: read_i8(buf, b + 121),
-            turn_undead_level: read_u8(buf, b + 122),
+            turn_undead_level: read_i8(buf, b + 122),
             level1: read_u8(buf, b + 556),
             level2: read_u8(buf, b + 557),
             level3: read_u8(buf, b + 558),
@@ -437,8 +444,8 @@ impl CreV1 {
         w.u32(self.xp);
         w.u32(self.gold);
         w.u32(self.status);
-        w.u16(self.hp_current);
-        w.u16(self.hp_max);
+        w.i16(self.hp_current);
+        w.i16(self.hp_max);
         w.u16(self.animation);
         w.u16(self.unused1);
         w.bytes(&self.colors);
@@ -453,24 +460,24 @@ impl CreV1 {
         w.i16(self.ac_mod_missile);
         w.i16(self.ac_mod_piercing);
         w.i16(self.ac_mod_slashing);
-        w.u8(self.thac0);
+        w.i8(self.thac0);
         w.u8(self.attacks_per_round);
-        w.u8(self.save_death);
-        w.u8(self.save_wand);
-        w.u8(self.save_polymorph);
-        w.u8(self.save_breath);
-        w.u8(self.save_spell);
-        w.u8(self.resist_fire);
-        w.u8(self.resist_cold);
-        w.u8(self.resist_electricity);
-        w.u8(self.resist_acid);
-        w.u8(self.resist_magic);
-        w.u8(self.resist_magic_fire);
-        w.u8(self.resist_magic_cold);
-        w.u8(self.resist_slashing);
-        w.u8(self.resist_crushing);
-        w.u8(self.resist_piercing);
-        w.u8(self.resist_missile);
+        w.i8(self.save_death);
+        w.i8(self.save_wand);
+        w.i8(self.save_polymorph);
+        w.i8(self.save_breath);
+        w.i8(self.save_spell);
+        w.i8(self.resist_fire);
+        w.i8(self.resist_cold);
+        w.i8(self.resist_electricity);
+        w.i8(self.resist_acid);
+        w.i8(self.resist_magic);
+        w.i8(self.resist_magic_fire);
+        w.i8(self.resist_magic_cold);
+        w.i8(self.resist_slashing);
+        w.i8(self.resist_crushing);
+        w.i8(self.resist_piercing);
+        w.i8(self.resist_missile);
         w.u8(self.detect_illusion);
         w.u8(self.set_traps);
         w.u8(self.lore);
@@ -480,7 +487,7 @@ impl CreV1 {
         w.u8(self.pick_pockets);
         w.u8(self.fatigue);
         w.u8(self.intoxication);
-        w.u8(self.luck);
+        w.i8(self.luck);
         w.u8(self.prof_large_sword.0);
         w.u8(self.prof_small_sword.0);
         w.u8(self.prof_bow.0);
@@ -495,7 +502,7 @@ impl CreV1 {
         w.i8(self.reputation_mod_killed);
         w.i8(self.reputation_mod_join);
         w.i8(self.reputation_mod_leave);
-        w.u8(self.turn_undead_level);
+        w.i8(self.turn_undead_level);
         w.u8(self.tracking);
         w.bytes(&self.target_text);
         w.bytes(&self.sound_slots);

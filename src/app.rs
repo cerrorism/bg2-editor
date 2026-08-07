@@ -33,7 +33,10 @@ pub struct Bg2EditorApp {
 
 impl Default for Bg2EditorApp {
     fn default() -> Self {
-        let save_root = save_file::default_save_roots().into_iter().find(|p| p.is_dir());
+        // Prefer a previously-picked save folder (persisted across
+        // launches) over the auto-detect heuristic.
+        let save_root = config::load_save_root()
+            .or_else(|| save_file::default_save_roots().into_iter().find(|p| p.is_dir()));
         let save_folders = save_root
             .as_deref()
             .map(save_file::list_save_folders)
@@ -80,6 +83,7 @@ impl Bg2EditorApp {
                         dialog = dialog.set_directory(dir);
                     }
                     if let Some(folder) = dialog.pick_folder() {
+                        config::save_save_root(&folder);
                         self.save_folders = save_file::list_save_folders(&folder);
                         self.save_root = Some(folder);
                         self.selected_folder_idx = None;
@@ -271,17 +275,24 @@ fn drag_u8(ui: &mut Ui, label: &str, value: &mut u8, range: std::ops::RangeInclu
     ui.end_row();
 }
 
-fn drag_i16(ui: &mut Ui, label: &str, value: &mut i16, dirty: &mut bool) {
+/// For fields that are genuinely signed in the file format (resistances,
+/// saves, THAC0, luck, turn undead level) — always uses the field's full
+/// native range (i8::MIN..=i8::MAX). Deliberately has no caller-supplied
+/// range: a narrower range here previously caused DragValue to silently
+/// clamp legitimate existing data (e.g. a vulnerability's negative
+/// resistance) the moment the tab was rendered, corrupting saves without
+/// any user action. Full range is always safe; a narrow one is not.
+fn drag_i8(ui: &mut Ui, label: &str, value: &mut i8, dirty: &mut bool) {
     ui.label(label);
     let old = *value;
-    let resp = ui.add(DragValue::new(value));
+    let resp = ui.add(DragValue::new(value).range(i8::MIN..=i8::MAX));
     if resp.changed() && *value != old {
         *dirty = true;
     }
     ui.end_row();
 }
 
-fn drag_u16(ui: &mut Ui, label: &str, value: &mut u16, dirty: &mut bool) {
+fn drag_i16(ui: &mut Ui, label: &str, value: &mut i16, dirty: &mut bool) {
     ui.label(label);
     let old = *value;
     let resp = ui.add(DragValue::new(value));
@@ -306,18 +317,23 @@ fn tab_abilities(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
         egui::Grid::new("abilities_grid").num_columns(2).spacing([16.0, 6.0]).striped(true).show(&mut cols[0], |ui| {
             ui.heading("Ability Scores");
             ui.end_row();
-            drag_u8(ui, "Strength", &mut cre.str_score, 1..=25, dirty);
-            drag_u8(ui, "Strength % (18/xx)", &mut cre.str_bonus, 0..=100, dirty);
-            drag_u8(ui, "Dexterity", &mut cre.dex_score, 1..=25, dirty);
-            drag_u8(ui, "Constitution", &mut cre.con_score, 1..=25, dirty);
-            drag_u8(ui, "Intelligence", &mut cre.int_score, 1..=25, dirty);
-            drag_u8(ui, "Wisdom", &mut cre.wis_score, 1..=25, dirty);
-            drag_u8(ui, "Charisma", &mut cre.cha_score, 1..=25, dirty);
+            // Full 0..=255 range rather than the nominal 1-25/0-100: a
+            // narrower range previously caused DragValue to silently
+            // clamp legitimate out-of-nominal-range data (see the
+            // resistance/reputation/spell-level fields for confirmed
+            // real-world instances of this). Always prefer full range.
+            drag_u8(ui, "Strength", &mut cre.str_score, 0..=255, dirty);
+            drag_u8(ui, "Strength % (18/xx)", &mut cre.str_bonus, 0..=255, dirty);
+            drag_u8(ui, "Dexterity", &mut cre.dex_score, 0..=255, dirty);
+            drag_u8(ui, "Constitution", &mut cre.con_score, 0..=255, dirty);
+            drag_u8(ui, "Intelligence", &mut cre.int_score, 0..=255, dirty);
+            drag_u8(ui, "Wisdom", &mut cre.wis_score, 0..=255, dirty);
+            drag_u8(ui, "Charisma", &mut cre.cha_score, 0..=255, dirty);
 
             ui.heading("Hit Points");
             ui.end_row();
-            drag_u16(ui, "Current HP", &mut cre.hp_current, dirty);
-            drag_u16(ui, "Max HP", &mut cre.hp_max, dirty);
+            drag_i16(ui, "Current HP", &mut cre.hp_current, dirty);
+            drag_i16(ui, "Max HP", &mut cre.hp_max, dirty);
 
             ui.heading("Experience & Gold");
             ui.end_row();
@@ -334,29 +350,29 @@ fn tab_abilities(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
             drag_i16(ui, "AC vs Missile", &mut cre.ac_mod_missile, dirty);
             drag_i16(ui, "AC vs Piercing", &mut cre.ac_mod_piercing, dirty);
             drag_i16(ui, "AC vs Slashing", &mut cre.ac_mod_slashing, dirty);
-            drag_u8(ui, "THAC0", &mut cre.thac0, 0..=25, dirty);
+            drag_i8(ui, "THAC0", &mut cre.thac0, dirty);
 
             ui.heading("Saving Throws");
             ui.end_row();
-            drag_u8(ui, "vs Death", &mut cre.save_death, 0..=20, dirty);
-            drag_u8(ui, "vs Wands", &mut cre.save_wand, 0..=20, dirty);
-            drag_u8(ui, "vs Polymorph", &mut cre.save_polymorph, 0..=20, dirty);
-            drag_u8(ui, "vs Breath", &mut cre.save_breath, 0..=20, dirty);
-            drag_u8(ui, "vs Spell", &mut cre.save_spell, 0..=20, dirty);
+            drag_i8(ui, "vs Death", &mut cre.save_death, dirty);
+            drag_i8(ui, "vs Wands", &mut cre.save_wand, dirty);
+            drag_i8(ui, "vs Polymorph", &mut cre.save_polymorph, dirty);
+            drag_i8(ui, "vs Breath", &mut cre.save_breath, dirty);
+            drag_i8(ui, "vs Spell", &mut cre.save_spell, dirty);
 
-            ui.heading("Resistances (%)");
+            ui.heading("Resistances (%, negative = vulnerability)");
             ui.end_row();
-            drag_u8(ui, "Fire", &mut cre.resist_fire, 0..=100, dirty);
-            drag_u8(ui, "Cold", &mut cre.resist_cold, 0..=100, dirty);
-            drag_u8(ui, "Electricity", &mut cre.resist_electricity, 0..=100, dirty);
-            drag_u8(ui, "Acid", &mut cre.resist_acid, 0..=100, dirty);
-            drag_u8(ui, "Magic", &mut cre.resist_magic, 0..=100, dirty);
-            drag_u8(ui, "Magic Fire", &mut cre.resist_magic_fire, 0..=100, dirty);
-            drag_u8(ui, "Magic Cold", &mut cre.resist_magic_cold, 0..=100, dirty);
-            drag_u8(ui, "Slashing", &mut cre.resist_slashing, 0..=100, dirty);
-            drag_u8(ui, "Crushing", &mut cre.resist_crushing, 0..=100, dirty);
-            drag_u8(ui, "Piercing", &mut cre.resist_piercing, 0..=100, dirty);
-            drag_u8(ui, "Missile", &mut cre.resist_missile, 0..=100, dirty);
+            drag_i8(ui, "Fire", &mut cre.resist_fire, dirty);
+            drag_i8(ui, "Cold", &mut cre.resist_cold, dirty);
+            drag_i8(ui, "Electricity", &mut cre.resist_electricity, dirty);
+            drag_i8(ui, "Acid", &mut cre.resist_acid, dirty);
+            drag_i8(ui, "Magic", &mut cre.resist_magic, dirty);
+            drag_i8(ui, "Magic Fire", &mut cre.resist_magic_fire, dirty);
+            drag_i8(ui, "Magic Cold", &mut cre.resist_magic_cold, dirty);
+            drag_i8(ui, "Slashing", &mut cre.resist_slashing, dirty);
+            drag_i8(ui, "Crushing", &mut cre.resist_crushing, dirty);
+            drag_i8(ui, "Piercing", &mut cre.resist_piercing, dirty);
+            drag_i8(ui, "Missile", &mut cre.resist_missile, dirty);
         });
     });
 }
@@ -406,9 +422,9 @@ fn tab_class_skills(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&
             ui.heading("Other");
             ui.end_row();
             drag_u8(ui, "Attacks / Round (raw)", &mut cre.attacks_per_round, 0..=10, dirty);
-            drag_u8(ui, "Turn Undead Level", &mut cre.turn_undead_level, 0..=30, dirty);
-            drag_u8(ui, "Luck", &mut cre.luck, 0..=100, dirty);
-            drag_u8(ui, "Reputation (this creature)", &mut cre.reputation, 0..=20, dirty);
+            drag_i8(ui, "Turn Undead Level", &mut cre.turn_undead_level, dirty);
+            drag_i8(ui, "Luck", &mut cre.luck, dirty);
+            drag_u8(ui, "Reputation (this creature, raw byte)", &mut cre.reputation, 0..=255, dirty);
         });
     });
 }
@@ -417,7 +433,9 @@ fn drag_prof(ui: &mut Ui, label: &str, prof: &mut crate::format::cre::ProfByte, 
     ui.label(label);
     let mut rank = prof.rank();
     let old = rank;
-    let resp = ui.add(DragValue::new(&mut rank).range(0..=5u8));
+    // 0..=7, the field's true 3-bit range, not the gameplay-typical 0..=5
+    // cap — see drag_i8's doc comment for why a narrower range is unsafe.
+    let resp = ui.add(DragValue::new(&mut rank).range(0..=7u8));
     if resp.changed() && rank != old {
         prof.set_rank(rank);
         *dirty = true;
@@ -599,7 +617,7 @@ fn picker_button(ui: &mut Ui, id: egui::Id, button_label: &str, gd: &GameData, k
 
 fn drag_u16_inline(ui: &mut Ui, value: &mut u16, dirty: &mut bool) {
     let old = *value;
-    if ui.add(DragValue::new(value).range(0..=9999u16)).changed() && *value != old {
+    if ui.add(DragValue::new(value).range(0..=u16::MAX)).changed() && *value != old {
         *dirty = true;
     }
 }
@@ -763,7 +781,7 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
                     let row_id = ui.id().with(("known_row", i));
                     edit_resref(ui, row_id, &mut cre.known_spells[i].spell, dirty, 80.0, gd, CatalogKind::Spell);
                     let mut lvl = cre.known_spells[i].level;
-                    if ui.add(DragValue::new(&mut lvl).range(1..=9u16)).changed() {
+                    if ui.add(DragValue::new(&mut lvl).range(0..=9u16)).changed() {
                         cre.known_spells[i].level = lvl;
                         *dirty = true;
                     }
@@ -786,7 +804,7 @@ fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&GameDa
                     ui.horizontal(|ui| {
                         ui.label("Level:");
                         let mut lvl = cre.mem_info[level_idx].level;
-                        if ui.add(DragValue::new(&mut lvl).range(1..=9u16)).changed() {
+                        if ui.add(DragValue::new(&mut lvl).range(0..=9u16)).changed() {
                             cre.mem_info[level_idx].level = lvl;
                             *dirty = true;
                         }
