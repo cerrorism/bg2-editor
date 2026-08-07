@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use egui::{DragValue, ScrollArea, Ui};
 
-use crate::format::cre::CreV1;
+use crate::format::cre::{CreV1, InvItem, KnownSpell, MemorizedSpell, ITEM_SLOT_NAMES};
 use crate::format::gam::GamFile;
+use crate::format::primitives::ResRef;
 use crate::save_file;
 
 #[derive(PartialEq, Clone, Copy)]
@@ -199,12 +200,8 @@ impl Bg2EditorApp {
             ScrollArea::vertical().show(ui, |ui| match self.tab {
                 Tab::Abilities => tab_abilities(ui, cre, dirty),
                 Tab::ClassSkills => tab_class_skills(ui, cre, dirty),
-                Tab::Inventory => {
-                    ui.label("Inventory editing is not implemented yet.");
-                }
-                Tab::Spells => {
-                    ui.label("Spellbook editing is not implemented yet.");
-                }
+                Tab::Inventory => tab_inventory(ui, cre, dirty),
+                Tab::Spells => tab_spells(ui, cre, dirty),
             });
         });
     }
@@ -329,6 +326,15 @@ fn tab_class_skills(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
             drag_u8(ui, "Level (class 2)", &mut cre.level2, 0..=99, dirty);
             drag_u8(ui, "Level (class 3)", &mut cre.level3, 0..=99, dirty);
 
+            ui.heading("Class & Race (raw IDs — name lookup not implemented yet)");
+            ui.end_row();
+            drag_u8(ui, "Class (CLASS.IDS)", &mut cre.class, 0..=255, dirty);
+            drag_u8(ui, "Race (RACE.IDS)", &mut cre.race, 0..=255, dirty);
+            drag_u8(ui, "Gender (GENDER.IDS)", &mut cre.gender, 0..=255, dirty);
+            drag_u8(ui, "Alignment (ALIGNMEN.IDS)", &mut cre.alignment, 0..=255, dirty);
+            drag_u8(ui, "Allegiance (EA.IDS)", &mut cre.allegiance, 0..=255, dirty);
+            drag_u32(ui, "Kit (KIT.IDS)", &mut cre.kit, dirty);
+
             ui.heading("Weapon Proficiencies (pips)");
             ui.end_row();
             drag_prof(ui, "Large Sword", &mut cre.prof_large_sword, dirty);
@@ -373,4 +379,253 @@ fn drag_prof(ui: &mut Ui, label: &str, prof: &mut crate::format::cre::ProfByte, 
         *dirty = true;
     }
     ui.end_row();
+}
+
+/// Edits a ResRef as an up-to-8-character text field. Resrefs have no
+/// friendly-name lookup yet (that needs the game-install resolver), so
+/// this is the raw resource code (e.g. `SW1H01`).
+fn edit_resref(ui: &mut Ui, resref: &mut ResRef, dirty: &mut bool, width: f32) {
+    let mut s = resref.as_str();
+    if ui.add(egui::TextEdit::singleline(&mut s).desired_width(width)).changed() {
+        s.truncate(8);
+        let new = ResRef::from_str(&s.to_ascii_uppercase());
+        if new != *resref {
+            *resref = new;
+            *dirty = true;
+        }
+    }
+}
+
+fn drag_u16_inline(ui: &mut Ui, value: &mut u16, dirty: &mut bool) {
+    let old = *value;
+    if ui.add(DragValue::new(value).range(0..=9999u16)).changed() && *value != old {
+        *dirty = true;
+    }
+}
+
+const SPELL_TYPES: [&str; 3] = ["Priest", "Wizard", "Innate"];
+
+fn spell_type_combo(ui: &mut Ui, kind: &mut u16, dirty: &mut bool, id: impl std::hash::Hash) {
+    let current = SPELL_TYPES.get(*kind as usize).copied().unwrap_or("?");
+    let mut chosen = *kind;
+    egui::ComboBox::from_id_salt(id).selected_text(current).show_ui(ui, |ui| {
+        for (i, name) in SPELL_TYPES.iter().enumerate() {
+            ui.selectable_value(&mut chosen, i as u16, *name);
+        }
+    });
+    if chosen != *kind {
+        *kind = chosen;
+        *dirty = true;
+    }
+}
+
+fn tab_inventory(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
+    let mut to_remove: Option<usize> = None;
+
+    ui.columns(2, |cols| {
+        egui::Grid::new("equip_grid").num_columns(2).spacing([12.0, 4.0]).striped(true).show(&mut cols[0], |ui| {
+            ui.heading("Equipped");
+            ui.end_row();
+            let item_count = cre.items.len();
+            for i in 0..cre.item_slots.len() {
+                ui.label(ITEM_SLOT_NAMES[i]);
+                let current = cre.item_slots[i];
+                let selected_text = if current < 0 {
+                    "(empty)".to_owned()
+                } else if (current as usize) < item_count {
+                    format!("[{}] {}", current, cre.items[current as usize].item.as_str())
+                } else {
+                    format!("(invalid index {current})")
+                };
+                let mut chosen = current;
+                egui::ComboBox::from_id_salt(("equip_slot", i)).selected_text(selected_text).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut chosen, -1i16, "(empty)");
+                    for (idx, it) in cre.items.iter().enumerate() {
+                        ui.selectable_value(&mut chosen, idx as i16, format!("[{idx}] {}", it.item.as_str()));
+                    }
+                });
+                if chosen != current {
+                    cre.item_slots[i] = chosen;
+                    *dirty = true;
+                }
+                ui.end_row();
+            }
+        });
+
+        cols[1].heading("All Items");
+        cols[1].label(egui::RichText::new("Includes equipped items; slots on the left reference these by index.").small().weak());
+        if cols[1].button("+ Add Item").clicked() {
+            cre.items.push(InvItem { item: ResRef::EMPTY, duration: 0, qty: [1, 0, 0], flags: 1 });
+            *dirty = true;
+        }
+        ScrollArea::vertical().id_salt("items_scroll").max_height(520.0).show(&mut cols[1], |ui| {
+            egui::Grid::new("items_grid").num_columns(6).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
+                ui.strong("#");
+                ui.strong("Item");
+                ui.strong("Qty 1");
+                ui.strong("Qty 2");
+                ui.strong("Qty 3");
+                ui.strong("ID'd");
+                ui.strong("");
+                ui.end_row();
+                for i in 0..cre.items.len() {
+                    ui.label(format!("{i}"));
+                    edit_resref(ui, &mut cre.items[i].item, dirty, 70.0);
+                    drag_u16_inline(ui, &mut cre.items[i].qty[0], dirty);
+                    drag_u16_inline(ui, &mut cre.items[i].qty[1], dirty);
+                    drag_u16_inline(ui, &mut cre.items[i].qty[2], dirty);
+                    let mut identified = cre.items[i].flags & 1 != 0;
+                    if ui.checkbox(&mut identified, "").changed() {
+                        if identified {
+                            cre.items[i].flags |= 1;
+                        } else {
+                            cre.items[i].flags &= !1;
+                        }
+                        *dirty = true;
+                    }
+                    if ui.button("✖").clicked() {
+                        to_remove = Some(i);
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+    });
+
+    if let Some(i) = to_remove {
+        cre.remove_item(i);
+        *dirty = true;
+    }
+}
+
+enum SpellAction {
+    RemoveKnown(usize),
+    AddKnown,
+    AddLevel,
+    RemoveLevel(usize),
+    AddMemorized(usize),
+    RemoveMemorized(usize, usize),
+}
+
+fn tab_spells(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool) {
+    let mut action: Option<SpellAction> = None;
+
+    ui.columns(2, |cols| {
+        cols[0].heading("Known Spells");
+        if cols[0].button("+ Add Known Spell").clicked() {
+            action = Some(SpellAction::AddKnown);
+        }
+        ScrollArea::vertical().id_salt("known_scroll").max_height(520.0).show(&mut cols[0], |ui| {
+            egui::Grid::new("known_grid").num_columns(4).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
+                ui.strong("Spell");
+                ui.strong("Level");
+                ui.strong("Type");
+                ui.strong("");
+                ui.end_row();
+                for i in 0..cre.known_spells.len() {
+                    edit_resref(ui, &mut cre.known_spells[i].spell, dirty, 80.0);
+                    let mut lvl = cre.known_spells[i].level;
+                    if ui.add(DragValue::new(&mut lvl).range(1..=9u16)).changed() {
+                        cre.known_spells[i].level = lvl;
+                        *dirty = true;
+                    }
+                    spell_type_combo(ui, &mut cre.known_spells[i].kind, dirty, ("known_kind", i));
+                    if ui.button("✖").clicked() {
+                        action = Some(SpellAction::RemoveKnown(i));
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+
+        cols[1].heading("Memorized Spells");
+        if cols[1].button("+ Add Spell Level").clicked() {
+            action = Some(SpellAction::AddLevel);
+        }
+        ScrollArea::vertical().id_salt("mem_scroll").max_height(520.0).show(&mut cols[1], |ui| {
+            for level_idx in 0..cre.mem_info.len() {
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Level:");
+                        let mut lvl = cre.mem_info[level_idx].level;
+                        if ui.add(DragValue::new(&mut lvl).range(1..=9u16)).changed() {
+                            cre.mem_info[level_idx].level = lvl;
+                            *dirty = true;
+                        }
+                        ui.label("Type:");
+                        spell_type_combo(ui, &mut cre.mem_info[level_idx].kind, dirty, ("mem_kind", level_idx));
+                        ui.label("Max:");
+                        let mut total = cre.mem_info[level_idx].memorizable_total;
+                        if ui.add(DragValue::new(&mut total).range(0..=99u16)).changed() {
+                            cre.mem_info[level_idx].memorizable_total = total;
+                            *dirty = true;
+                        }
+                        ui.label("Currently castable:");
+                        let mut current = cre.mem_info[level_idx].memorizable_current;
+                        if ui.add(DragValue::new(&mut current).range(0..=99u16)).changed() {
+                            cre.mem_info[level_idx].memorizable_current = current;
+                            *dirty = true;
+                        }
+                        if ui.button("✖ Remove Level").clicked() {
+                            action = Some(SpellAction::RemoveLevel(level_idx));
+                        }
+                    });
+
+                    let start = cre.mem_info[level_idx].table_index as usize;
+                    let count = cre.mem_info[level_idx].count as usize;
+                    egui::Grid::new(("mem_grid", level_idx)).num_columns(5).spacing([6.0, 4.0]).striped(true).show(ui, |ui| {
+                        for local_idx in 0..count {
+                            let spell = &mut cre.memorized_spells[start + local_idx];
+                            edit_resref(ui, &mut spell.spell, dirty, 80.0);
+                            let mut cast = spell.flags & 0b001 != 0;
+                            let mut memorized = spell.flags & 0b010 != 0;
+                            let mut disabled = spell.flags & 0b100 != 0;
+                            if ui.checkbox(&mut memorized, "Memorized").changed()
+                                || ui.checkbox(&mut cast, "Cast").changed()
+                                || ui.checkbox(&mut disabled, "Disabled").changed()
+                            {
+                                spell.flags = (cast as u16) | ((memorized as u16) << 1) | ((disabled as u16) << 2);
+                                *dirty = true;
+                            }
+                            if ui.button("✖").clicked() {
+                                action = Some(SpellAction::RemoveMemorized(level_idx, local_idx));
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    if ui.button("+ Add Spell to This Level").clicked() {
+                        action = Some(SpellAction::AddMemorized(level_idx));
+                    }
+                });
+            }
+        });
+    });
+
+    match action {
+        Some(SpellAction::RemoveKnown(i)) => {
+            cre.known_spells.remove(i);
+            *dirty = true;
+        }
+        Some(SpellAction::AddKnown) => {
+            cre.known_spells.push(KnownSpell { spell: ResRef::EMPTY, level: 1, kind: 1 });
+            *dirty = true;
+        }
+        Some(SpellAction::AddLevel) => {
+            cre.add_mem_level(1, 1, 1);
+            *dirty = true;
+        }
+        Some(SpellAction::RemoveLevel(i)) => {
+            cre.remove_mem_level(i);
+            *dirty = true;
+        }
+        Some(SpellAction::AddMemorized(level_idx)) => {
+            cre.add_memorized_spell(level_idx, MemorizedSpell { spell: ResRef::EMPTY, flags: 0b010 });
+            *dirty = true;
+        }
+        Some(SpellAction::RemoveMemorized(level_idx, local_idx)) => {
+            cre.remove_memorized_spell(level_idx, local_idx);
+            *dirty = true;
+        }
+        None => {}
+    }
 }

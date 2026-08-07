@@ -7,15 +7,19 @@ The on-disk formats (GAM save file, embedded CRE creature structure) are reverse
 ## Status
 
 **Implemented:**
-- Full binary parser/serializer for the GAM V2.0 save format (BG1:EE/BG2/BG2:EE), including embedded CRE V1.0 party-member creature data (attributes, proficiencies, inventory, spellbook — everything, not just what the UI exposes yet).
-- UI: browse a save folder, pick a party member, edit **Abilities & Combat** (ability scores, HP, AC, THAC0, saves, resistances) and **Class & Skills** (levels, weapon proficiency pips, thief skills). Save writes back with an automatic `baldur.gam.bak` backup.
+- Full binary parser/serializer for the GAM V2.0 save format (BG1:EE/BG2/BG2:EE), including embedded CRE V1.0 party-member creature data (attributes, proficiencies, inventory, spellbook).
+- UI, four tabs per party member:
+  - **Abilities & Combat** — ability scores, HP, AC, THAC0, saves, resistances.
+  - **Class & Skills** — levels, weapon proficiency pips, thief skills.
+  - **Inventory** — all 38 equipped slots (helmet/armor/weapons/rings/etc., picked from the character's item list) plus the full item list itself (add/remove, quantities/charges, identified flag).
+  - **Spells** — known spells (add/remove) and memorized spells grouped by spell-level/class block (add/remove whole levels, add/remove/toggle individual memorized spells, edit max/current memorizable counts).
+  - Items and spells are currently edited by raw resource code (e.g. `SW1H01`, `SPWI112`) — no friendly-name picker yet, see "Not yet implemented" below.
+- Save writes back with an automatic `baldur.gam.bak` backup.
 
-**Validated against real save data** (three BG1:EE saves from an actual playthrough, one party member + up to 36 embedded non-party creatures each): parsing, in-memory round trip, and the full load → edit → `save_with_backup` → reload write path all produce **byte-for-byte identical** output to the original `baldur.gam` aside from the intended edit. See `examples/inspect.rs` (read-only diagnostic) and `examples/test_save.rs` (exercises the write path against a scratch copy, never the original).
+**Validated against real save data** (three BG1:EE saves from an actual playthrough; one save has 1 party member + 36 embedded non-party creatures, each with their own spells/items): parsing, in-memory round trip, and the full load → edit → `save_with_backup` → reload write path all produce **byte-for-byte identical** output to the original `baldur.gam` aside from the intended edit. The inventory/spellbook mutation helpers (add/remove item, add/remove known spell, add/remove memorized spell, add/remove a whole spell-level block — each of which has to keep index/offset bookkeeping consistent across the CRE's variable-length sections) are also exercised against real save data. See `examples/inspect.rs` (read-only diagnostic), `examples/test_save.rs` (write path against a scratch copy), and `examples/test_mutations.rs` (inventory/spellbook mutations, read-only).
 
 **Not yet implemented:**
-- Inventory editing (equipped slots + general inventory) — parser support exists, UI does not.
-- Spellbook editing (known + memorized spells) — parser support exists, UI does not.
-- Item/spell/class/kit name resolution from the game install (`chitin.key`/`.bif`/`dialog.tlk`/`.IDS`) — currently no UI needs this yet since inventory/spells aren't wired up.
+- Item/spell/class/kit/race/alignment name resolution from the game install (`chitin.key`/`.bif`/`dialog.tlk`/`.IDS`) — items and spells are edited by raw resource code, and class/race/kit/alignment are shown as raw numeric IDs on the Class & Skills tab rather than names.
 
 ## Build
 
@@ -38,9 +42,10 @@ Runs structural round-trip tests (`parse(serialize(x)) == x`) for both the CRE a
 ```powershell
 cargo run --example inspect -- "<save-folder>"
 cargo run --example test_save -- "<scratch-copy-of-a-save-folder>"
+cargo run --example test_mutations -- "<save-folder>"
 ```
 
-`inspect` is read-only: loads a real save, prints key fields, and reports whether an in-memory serialize+reparse is byte-identical to the original file. `test_save` exercises the actual write path (edits a stat, calls `save_with_backup`, verifies the backup matches the pre-edit original and the reload picks up the edit) — always run it against a scratch copy, never a save folder you care about.
+`inspect` is read-only: loads a real save, prints key fields, and reports whether an in-memory serialize+reparse is byte-identical to the original file. `test_save` exercises the actual write path (edits a stat, calls `save_with_backup`, verifies the backup matches the pre-edit original and the reload picks up the edit) — always run it against a scratch copy, never a save folder you care about. `test_mutations` is read-only: runs the inventory/spellbook add/remove helpers against a real character and checks the result still round-trips consistently.
 
 Not yet verified: loading an edited save back into the actual game.
 

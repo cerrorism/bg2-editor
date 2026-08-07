@@ -609,6 +609,82 @@ impl CreV1 {
 
         w.0
     }
+
+    /// Removes `items[idx]`, clearing any equipped-slot reference to it
+    /// (setting that slot to empty) and shifting every other slot index
+    /// that pointed past it down by one, keeping `item_slots` consistent
+    /// with the new (shorter) `items` array.
+    pub fn remove_item(&mut self, idx: usize) {
+        self.items.remove(idx);
+        let idx = idx as i16;
+        for slot in self.item_slots.iter_mut() {
+            if *slot == idx {
+                *slot = -1;
+            } else if *slot > idx {
+                *slot -= 1;
+            }
+        }
+    }
+
+    /// Appends a spell to the flat `memorized_spells` table within the
+    /// block owned by `mem_info[level_idx]`, updating that entry's `count`
+    /// and shifting every other level's `table_index` that falls after the
+    /// insertion point, so the table stays contiguous and correctly sliced.
+    pub fn add_memorized_spell(&mut self, level_idx: usize, spell: MemorizedSpell) {
+        let insert_pos = (self.mem_info[level_idx].table_index + self.mem_info[level_idx].count) as usize;
+        self.memorized_spells.insert(insert_pos, spell);
+        self.mem_info[level_idx].count += 1;
+        for (i, m) in self.mem_info.iter_mut().enumerate() {
+            // >= (not >): a block starting exactly at insert_pos is the
+            // common contiguous-layout case (e.g. the next spell level's
+            // block starts right where this one ends) and must shift too.
+            if i != level_idx && m.table_index as usize >= insert_pos {
+                m.table_index += 1;
+            }
+        }
+    }
+
+    /// Removes the `local_idx`-th spell memorized at `mem_info[level_idx]`,
+    /// with the same table-index bookkeeping as `add_memorized_spell`.
+    pub fn remove_memorized_spell(&mut self, level_idx: usize, local_idx: usize) {
+        let abs_pos = self.mem_info[level_idx].table_index as usize + local_idx;
+        self.memorized_spells.remove(abs_pos);
+        self.mem_info[level_idx].count -= 1;
+        for (i, m) in self.mem_info.iter_mut().enumerate() {
+            if i != level_idx && m.table_index as usize > abs_pos {
+                m.table_index -= 1;
+            }
+        }
+    }
+
+    /// Adds a new (initially empty) spell-memorization level/class block,
+    /// e.g. for a character gaining access to a spell level they didn't
+    /// have before.
+    pub fn add_mem_level(&mut self, level: u16, kind: u16, memorizable: u16) {
+        self.mem_info.push(MemInfo {
+            level,
+            memorizable_total: memorizable,
+            memorizable_current: memorizable,
+            kind,
+            table_index: self.memorized_spells.len() as u32,
+            count: 0,
+        });
+    }
+
+    /// Removes `mem_info[level_idx]` and every spell memorized in it,
+    /// rebasing every other level's `table_index` that pointed past this
+    /// block's start.
+    pub fn remove_mem_level(&mut self, level_idx: usize) {
+        let entry = self.mem_info.remove(level_idx);
+        let start = entry.table_index as usize;
+        let count = entry.count as usize;
+        self.memorized_spells.drain(start..start + count);
+        for m in self.mem_info.iter_mut() {
+            if m.table_index as usize > start {
+                m.table_index -= count as u32;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -784,5 +860,89 @@ mod tests {
         let bytes = original.serialize();
         let parsed = CreV1::parse(&bytes, 0).expect("parse should succeed");
         assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn remove_item_clears_and_shifts_slots() {
+        let mut cre = sample_cre();
+        // sample_cre: item_slots[0] = 0 (HELM01), item_slots[9] = 1 (SW1H01)
+        cre.remove_item(0);
+        assert_eq!(cre.items.len(), 1);
+        assert_eq!(cre.items[0].item.as_str(), "SW1H01");
+        assert_eq!(cre.item_slots[0], -1, "slot referencing the removed item should clear");
+        assert_eq!(cre.item_slots[9], 0, "slot referencing a later item should shift down");
+
+        let bytes = cre.serialize();
+        let parsed = CreV1::parse(&bytes, 0).expect("parse should succeed");
+        assert_eq!(cre, parsed);
+    }
+
+    #[test]
+    fn memorized_spell_add_remove_keeps_other_levels_consistent() {
+        let mut cre = sample_cre();
+        // Add a second spell-level block after the existing one (level 1,
+        // table_index 0, count 2) so we can verify it shifts correctly.
+        cre.mem_info.push(MemInfo {
+            level: 2,
+            memorizable_total: 2,
+            memorizable_current: 2,
+            kind: 1,
+            table_index: 2,
+            count: 1,
+        });
+        cre.memorized_spells.push(MemorizedSpell { spell: ResRef::from_str("SPWI204"), flags: 0b010 });
+
+        // Add a spell to level 1 (index 0): should insert at absolute
+        // position 2 (end of level 1's block) and push level 2's
+        // table_index from 2 to 3.
+        cre.add_memorized_spell(0, MemorizedSpell { spell: ResRef::from_str("SPWI113"), flags: 0b010 });
+        assert_eq!(cre.mem_info[0].count, 3);
+        assert_eq!(cre.mem_info[1].table_index, 3);
+        assert_eq!(cre.memorized_spells[2].spell.as_str(), "SPWI113");
+        assert_eq!(cre.memorized_spells[3].spell.as_str(), "SPWI204");
+
+        let bytes = cre.serialize();
+        let parsed = CreV1::parse(&bytes, 0).expect("parse should succeed");
+        assert_eq!(cre, parsed);
+
+        // Remove the spell we just added from level 1: level 2's
+        // table_index should drop back to 2.
+        cre.remove_memorized_spell(0, 2);
+        assert_eq!(cre.mem_info[0].count, 2);
+        assert_eq!(cre.mem_info[1].table_index, 2);
+        assert_eq!(cre.memorized_spells[2].spell.as_str(), "SPWI204");
+
+        let bytes = cre.serialize();
+        let parsed = CreV1::parse(&bytes, 0).expect("parse should succeed");
+        assert_eq!(cre, parsed);
+    }
+
+    #[test]
+    fn mem_level_add_remove() {
+        let mut cre = sample_cre();
+        // sample_cre already has one level (table_index=0, count=2).
+        cre.add_mem_level(2, 1, 2);
+        assert_eq!(cre.mem_info.len(), 2);
+        assert_eq!(cre.mem_info[1].table_index, 2, "new level starts after the existing 2 memorized spells");
+
+        cre.add_memorized_spell(1, MemorizedSpell { spell: ResRef::from_str("SPWI204"), flags: 0b010 });
+        assert_eq!(cre.memorized_spells.len(), 3);
+        assert_eq!(cre.mem_info[1].count, 1);
+
+        let bytes = cre.serialize();
+        let parsed = CreV1::parse(&bytes, 0).expect("parse should succeed");
+        assert_eq!(cre, parsed);
+
+        // Removing level 0 (the original 2-spell block) should drop those
+        // 2 spells and rebase level 1's table_index from 2 down to 0.
+        cre.remove_mem_level(0);
+        assert_eq!(cre.mem_info.len(), 1);
+        assert_eq!(cre.mem_info[0].table_index, 0);
+        assert_eq!(cre.memorized_spells.len(), 1);
+        assert_eq!(cre.memorized_spells[0].spell.as_str(), "SPWI204");
+
+        let bytes = cre.serialize();
+        let parsed = CreV1::parse(&bytes, 0).expect("parse should succeed");
+        assert_eq!(cre, parsed);
     }
 }
