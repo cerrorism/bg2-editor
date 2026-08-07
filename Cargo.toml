@@ -1,0 +1,23 @@
+[package]
+name = "bg2-editor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "bg2_editor"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bg2-editor"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.31", features = ["default_fonts"] }
+egui = "0.31"
+rfd = "0.15"
+flate2 = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
