@@ -12,6 +12,7 @@ pub mod itm;
 pub mod key;
 pub mod portrait;
 pub mod spl;
+pub mod table2da;
 pub mod tlk;
 
 use std::cell::RefCell;
@@ -26,6 +27,7 @@ use ids::IdsTable;
 use itm::ItemStats;
 use key::KeyFile;
 use spl::SpellStats;
+use table2da::Table2da;
 use tlk::TlkFile;
 
 /// A (resref, display name) list for a full resource-type catalog (every
@@ -65,6 +67,7 @@ pub struct GameData {
     tlk: TlkFile,
     bif_archives: RefCell<HashMap<u32, BifArchive>>,
     ids_cache: RefCell<HashMap<String, Rc<IdsTable>>>,
+    table2da_cache: RefCell<HashMap<String, Option<Rc<Table2da>>>>,
     name_cache: RefCell<HashMap<(String, u16), Option<String>>>,
     item_catalog: RefCell<Option<Catalog>>,
     spell_catalog: RefCell<Option<Catalog>>,
@@ -103,6 +106,7 @@ impl GameData {
             tlk,
             bif_archives: RefCell::new(HashMap::new()),
             ids_cache: RefCell::new(HashMap::new()),
+            table2da_cache: RefCell::new(HashMap::new()),
             name_cache: RefCell::new(HashMap::new()),
             item_catalog: RefCell::new(None),
             spell_catalog: RefCell::new(None),
@@ -225,6 +229,82 @@ impl GameData {
     /// falling back to the raw number if the table or value isn't found.
     pub fn ids_label(&self, ids_name: &str, value: u32) -> String {
         self.ids(ids_name).and_then(|t| t.name(value).map(|s| s.to_string())).unwrap_or_else(|| value.to_string())
+    }
+
+    /// Loads (and caches) a `.2DA` table by resref, e.g. `"CLASTEXT"`.
+    /// `None` if the resource doesn't exist in this install (some tables,
+    /// like the ones this editor uses, are EE-only).
+    fn table2da(&self, resref: &str) -> Option<Rc<Table2da>> {
+        let key = resref.to_ascii_uppercase();
+        if let Some(cached) = self.table2da_cache.borrow().get(&key) {
+            return cached.clone();
+        }
+        let table = self.resource_bytes(&key, key::TYPE_2DA).map(|bytes| Rc::new(Table2da::parse(&String::from_utf8_lossy(&bytes))));
+        self.table2da_cache.borrow_mut().insert(key, table.clone());
+        table
+    }
+
+    /// A handful of dialog.tlk strings are literal unsubstituted
+    /// templates (e.g. `"<MAGESCHOOL>"`, `"<FIGHTERTYPE>"` — confirmed
+    /// real entries in `clastext.2da`'s `MIXED`/`LOWER` columns for the
+    /// Mage/Fighter base-class rows specifically, not a parsing bug),
+    /// meant to be filled in by the engine rather than shown as-is.
+    /// Treat those as "no real name available" so callers fall back
+    /// cleanly instead of displaying the placeholder.
+    fn filter_placeholder(s: Option<String>) -> Option<String> {
+        s.filter(|s| !s.trim_start().starts_with('<'))
+    }
+
+    /// Real in-game class display name (e.g. "Thief"/"盗贼"), resolved
+    /// via `clastext.2da` (columns: rowname, CLASSID, KITID, LOWER,
+    /// DESCSTR, MIXED, ...) rather than the raw `CLASS.IDS` symbol name
+    /// NearInfinity itself shows (e.g. "THIEF") — confirmed against real
+    /// data that `clastext.2da`'s `MIXED` column is what the game
+    /// actually displays, in whatever language `dialog.tlk` was loaded
+    /// with. The base-class row for a given `CLASS.IDS` value has
+    /// `KITID == 16384` (kitted variants of the same base class have
+    /// their own rows with a real `KITID`, handled by `kit_name`
+    /// instead). Returns `None` for Mage/Fighter's unkitted "true class"
+    /// row specifically — see `filter_placeholder`.
+    pub fn class_name(&self, class_id: u32) -> Option<String> {
+        let table = self.table2da("CLASTEXT")?;
+        let row = table.row_where(1, class_id as i64).filter(|r| r.get(2).and_then(|c| c.parse::<i64>().ok()) == Some(16384))?;
+        let strref: i32 = row.get(5)?.parse().ok()?;
+        Self::filter_placeholder(self.tlk_string(strref))
+    }
+
+    /// Real in-game race display name, resolved via `racetext.2da`
+    /// (columns: rowname, ID, NAME, DESCSTR, UPPERCASE, BIOGRAPHY) —
+    /// same rationale as `class_name`.
+    pub fn race_name(&self, race_id: u32) -> Option<String> {
+        let table = self.table2da("RACETEXT")?;
+        let row = table.row_where(1, race_id as i64)?;
+        let strref: i32 = row.get(4)?.parse().ok()?;
+        Self::filter_placeholder(self.tlk_string(strref))
+    }
+
+    /// Real in-game kit display name, resolved via `clastext.2da`. Joined
+    /// by *symbol* (e.g. `"BERSERKER"`) against `KIT.IDS`, not by
+    /// `clastext.2da`'s own `KITID` column — confirmed those are two
+    /// different numbering spaces: `KIT.IDS` stores each kit as a large
+    /// bitmask-style constant (e.g. Berserker = `0x4001`), while
+    /// `clastext.2da`'s `KITID` column is a small table-local sequence
+    /// (Berserker = `1`) — so joining on the raw kit value against that
+    /// column silently matches nothing (or the wrong row). `kit_id == 0`
+    /// ("No Kit") has no in-game display string of its own — it's a
+    /// synthetic value this editor uses for "no kit selected", not a
+    /// real `KIT.IDS`/`clastext.2da` entry — so that case isn't looked
+    /// up here at all; callers should special-case it themselves (as
+    /// `ids_field_kit` in `app.rs` already did before this existed).
+    pub fn kit_name(&self, kit_id: u32) -> Option<String> {
+        if kit_id == 0 {
+            return None;
+        }
+        let symbol = self.ids("KIT.IDS")?.name(kit_id)?.to_owned();
+        let table = self.table2da("CLASTEXT")?;
+        let row = table.row_where_name(&symbol)?;
+        let strref: i32 = row.get(5)?.parse().ok()?;
+        Self::filter_placeholder(self.tlk_string(strref))
     }
 
     /// Label for an ITM's weapon-proficiency byte. Prefers `PROFTYPE.IDS`,

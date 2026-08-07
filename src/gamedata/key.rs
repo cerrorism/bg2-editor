@@ -12,6 +12,7 @@ pub const TYPE_BAM: u16 = 0x3E8;
 pub const TYPE_ITM: u16 = 0x3ED;
 pub const TYPE_SPL: u16 = 0x3EE;
 pub const TYPE_IDS: u16 = 0x3F0;
+pub const TYPE_2DA: u16 = 0x3F4;
 /// Tileset resources use a different locator bit layout than everything
 /// else; not otherwise used by this editor, kept for `decode_locator`.
 pub const TYPE_TIS: u16 = 0x3EB;

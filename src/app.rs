@@ -479,11 +479,18 @@ fn tab_class_skills(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&
 
             ui.heading("Class & Race");
             ui.end_row();
-            ids_field_u8(ui, "Class", &mut cre.class, "CLASS.IDS", gd, dirty);
-            ids_field_u8(ui, "Race", &mut cre.race, "RACE.IDS", gd, dirty);
-            ids_field_u8(ui, "Gender", &mut cre.gender, "GENDER.IDS", gd, dirty);
-            ids_field_u8(ui, "Alignment", &mut cre.alignment, "ALIGNMEN.IDS", gd, dirty);
-            ids_field_u8(ui, "Allegiance", &mut cre.allegiance, "EA.IDS", gd, dirty);
+            ids_field_u8(ui, "Class", &mut cre.class, "CLASS.IDS", gd, dirty, Some(|gd, v| gd.class_name(v)));
+            ids_field_u8(ui, "Race", &mut cre.race, "RACE.IDS", gd, dirty, Some(|gd, v| gd.race_name(v)));
+            // Gender/Alignment/Allegiance have no known 2DA-based source
+            // for their real in-game display text (unlike Class/Race/Kit,
+            // which resolve through clastext.2da/racetext.2da) — the game
+            // appears to hardcode these directly in its UI scripts rather
+            // than a data file this editor can read, so they keep showing
+            // the raw .IDS symbol name (e.g. "FEMALE") rather than a
+            // localized label.
+            ids_field_u8(ui, "Gender", &mut cre.gender, "GENDER.IDS", gd, dirty, None);
+            ids_field_u8(ui, "Alignment", &mut cre.alignment, "ALIGNMEN.IDS", gd, dirty, None);
+            ids_field_u8(ui, "Allegiance", &mut cre.allegiance, "EA.IDS", gd, dirty, None);
             ids_field_kit(ui, "Kit", &mut cre.kit, gd, dirty);
 
             ui.heading("Weapon Proficiencies (pips)");
@@ -556,15 +563,34 @@ fn drag_prof(ui: &mut Ui, label: &str, prof: &mut crate::format::cre::ProfByte, 
 
 /// A dropdown of every symbol in `<ids_name>` (e.g. `"CLASS.IDS"`), when a
 /// game folder is set; otherwise a plain raw-number field. Ends the row.
-fn ids_field_u8(ui: &mut Ui, label: &str, value: &mut u8, ids_name: &str, gd: Option<&GameData>, dirty: &mut bool) {
+///
+/// `localize`, when given, is tried first for both the current selection's
+/// label and each option's label — real in-game display text (e.g.
+/// "Thief"/"盗贼" via `GameData::class_name`) rather than the raw `.IDS`
+/// symbol name (e.g. "THIEF") NearInfinity itself would show. Falls back
+/// to the symbol name for any value `localize` doesn't resolve (not
+/// every value has a real display-name source — see `class_name`'s
+/// doc comment), so the dropdown is never missing an option.
+fn ids_field_u8(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut u8,
+    ids_name: &str,
+    gd: Option<&GameData>,
+    dirty: &mut bool,
+    localize: Option<fn(&GameData, u32) -> Option<String>>,
+) {
     ui.label(label);
     if let Some(table) = gd.and_then(|gd| gd.ids(ids_name)) {
-        let current_label = table.name(*value as u32).map(|s| s.to_owned()).unwrap_or_else(|| format!("(unknown: {value})"));
+        let label_for = |val: u32, symbol: &str| -> String {
+            gd.zip(localize).and_then(|(gd, f)| f(gd, val)).unwrap_or_else(|| symbol.to_owned())
+        };
+        let current_label = table.name(*value as u32).map(|s| label_for(*value as u32, s)).unwrap_or_else(|| format!("(unknown: {value})"));
         let mut chosen = *value;
         egui::ComboBox::from_id_salt((ids_name, label)).selected_text(current_label).show_ui(ui, |ui| {
             for (val, name) in &table.entries {
                 if *val <= u8::MAX as u32 {
-                    ui.selectable_value(&mut chosen, *val as u8, name);
+                    ui.selectable_value(&mut chosen, *val as u8, label_for(*val, name));
                 }
             }
         });
@@ -583,20 +609,24 @@ fn ids_field_u8(ui: &mut Ui, label: &str, value: &mut u8, ids_name: &str, gd: Op
 
 /// Same as `ids_field_u8` but for the 32-bit KIT.IDS value, and always
 /// offers a synthetic "No Kit" (0) option since not every KIT.IDS
-/// explicitly defines a symbol for 0.
+/// explicitly defines a symbol for 0. Localizes via `GameData::kit_name`
+/// the same way `ids_field_u8` does for class/race.
 fn ids_field_kit(ui: &mut Ui, label: &str, value: &mut u32, gd: Option<&GameData>, dirty: &mut bool) {
     ui.label(label);
     if let Some(table) = gd.and_then(|gd| gd.ids("KIT.IDS")) {
+        let label_for = |val: u32, symbol: &str| -> String {
+            gd.and_then(|gd| gd.kit_name(val)).unwrap_or_else(|| symbol.to_owned())
+        };
         let current_label = if *value == 0 {
             "No Kit".to_owned()
         } else {
-            table.name(*value).map(|s| s.to_owned()).unwrap_or_else(|| format!("(unknown: {value:#06x})"))
+            table.name(*value).map(|s| label_for(*value, s)).unwrap_or_else(|| format!("(unknown: {value:#06x})"))
         };
         let mut chosen = *value;
         egui::ComboBox::from_id_salt("kit_combo").selected_text(current_label).show_ui(ui, |ui| {
             ui.selectable_value(&mut chosen, 0u32, "No Kit");
             for (val, name) in &table.entries {
-                ui.selectable_value(&mut chosen, *val, name);
+                ui.selectable_value(&mut chosen, *val, label_for(*val, name));
             }
         });
         if chosen != *value {
