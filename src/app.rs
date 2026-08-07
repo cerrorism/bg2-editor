@@ -148,6 +148,23 @@ impl Bg2EditorApp {
 
                 ui.separator();
 
+                ui.label("Party Reputation (raw, stored as displayed value × 10):");
+                ui.add_enabled_ui(self.gam.is_some(), |ui| {
+                    if let Some(gam) = &mut self.gam {
+                        let old = gam.reputation;
+                        let resp = ui.add(DragValue::new(&mut gam.reputation).range(0u32..=255u32));
+                        if resp.changed() && gam.reputation != old {
+                            self.is_dirty = true;
+                        }
+                        ui.label(egui::RichText::new(format!("(≈ {:.1})", gam.reputation as f32 / 10.0)).weak().small());
+                    } else {
+                        let mut dummy = 0u32;
+                        ui.add(DragValue::new(&mut dummy));
+                    }
+                });
+
+                ui.separator();
+
                 ui.add_enabled_ui(self.is_dirty, |ui| {
                     if ui.button("💾 Save").clicked() {
                         if let (Some(gam), Some(idx)) = (&self.gam, self.selected_folder_idx) {
@@ -424,9 +441,29 @@ fn tab_class_skills(ui: &mut Ui, cre: &mut CreV1, dirty: &mut bool, gd: Option<&
             drag_u8(ui, "Attacks / Round (raw)", &mut cre.attacks_per_round, 0..=10, dirty);
             drag_i8(ui, "Turn Undead Level", &mut cre.turn_undead_level, dirty);
             drag_i8(ui, "Luck", &mut cre.luck, dirty);
-            drag_u8(ui, "Reputation (this creature, raw byte)", &mut cre.reputation, 0..=255, dirty);
+            drag_reputation(ui, "Reputation (this creature)", &mut cre.reputation, dirty);
         });
     });
+}
+
+/// Confirmed against a real character (raw byte 120 <-> in-game "Normal
+/// (12)"): reputation is stored as the displayed value * 10. Edits the
+/// raw byte directly (so any value the game itself could write is always
+/// representable) but shows the computed in-game display value alongside
+/// so it's not just an opaque number. This is the per-creature copy, not
+/// the authoritative party-wide reputation (a separate GAM-level field,
+/// shown in the toolbar) - the game appears to sync party reputation
+/// into each party member's own copy, so editing this one alone may not
+/// be what you want.
+fn drag_reputation(ui: &mut Ui, label: &str, value: &mut u8, dirty: &mut bool) {
+    ui.label(label);
+    let old = *value;
+    let resp = ui.add(DragValue::new(value).range(0..=255u8));
+    if resp.changed() && *value != old {
+        *dirty = true;
+    }
+    ui.label(egui::RichText::new(format!("(≈ {:.1} in-game)", *value as f32 / 10.0)).weak().small());
+    ui.end_row();
 }
 
 fn drag_prof(ui: &mut Ui, label: &str, prof: &mut crate::format::cre::ProfByte, dirty: &mut bool) {
