@@ -55,7 +55,8 @@ impl Default for Bg2EditorApp {
             game_data: None,
         };
         if let Some(root) = config::load_game_root() {
-            if let Ok(data) = GameData::load(&root) {
+            let locale = app.save_root.as_deref().and_then(save_file::detect_active_language);
+            if let Ok(data) = GameData::load_with_locale(&root, locale.as_deref()) {
                 app.game_data = Some(Rc::new(data));
                 app.game_root = Some(root);
             }
@@ -89,6 +90,15 @@ impl Bg2EditorApp {
                         self.selected_folder_idx = None;
                         self.gam = None;
                         self.status_msg.clear();
+                        // Re-detect the active language now that we know
+                        // the save folder, in case the game folder was
+                        // set first (order-independent either way).
+                        if let Some(game_root) = self.game_root.clone() {
+                            let locale = self.save_root.as_deref().and_then(save_file::detect_active_language);
+                            if let Ok(data) = GameData::load_with_locale(&game_root, locale.as_deref()) {
+                                self.game_data = Some(Rc::new(data));
+                            }
+                        }
                     }
                 }
 
@@ -112,12 +122,16 @@ impl Bg2EditorApp {
                         dialog = dialog.set_directory(dir);
                     }
                     if let Some(folder) = dialog.pick_folder() {
-                        match GameData::load(&folder) {
+                        let locale = self.save_root.as_deref().and_then(save_file::detect_active_language);
+                        match GameData::load_with_locale(&folder, locale.as_deref()) {
                             Ok(data) => {
                                 config::save_game_root(&folder);
                                 self.game_root = Some(folder);
                                 self.game_data = Some(Rc::new(data));
-                                self.status_msg = "Game data loaded.".to_owned();
+                                self.status_msg = match &locale {
+                                    Some(l) => format!("Game data loaded (using {l} text)."),
+                                    None => "Game data loaded (using default/English text).".to_owned(),
+                                };
                             }
                             Err(e) => self.status_msg = format!("Failed to load game folder: {e}"),
                         }
@@ -241,7 +255,7 @@ impl Bg2EditorApp {
 
             ui.horizontal(|ui| {
                 for (i, member) in gam.party.iter().enumerate() {
-                    let name = member_display_name(member);
+                    let name = member_display_name(member, self.game_data.as_deref());
                     ui.selectable_value(&mut self.selected_char_idx, i, name);
                 }
             });
@@ -272,14 +286,23 @@ impl Bg2EditorApp {
     }
 }
 
-fn member_display_name(member: &crate::format::gam::PartyMember) -> String {
+/// The GAM party record's literal 32-byte name field is typically only
+/// populated for a player-customized character; recruited companions
+/// commonly leave it blank and get their display name from the embedded
+/// CRE's own `name_strref`, resolved via dialog.tlk (needs a game folder
+/// set — falls back to "(unnamed)" without one).
+fn member_display_name(member: &crate::format::gam::PartyMember, gd: Option<&GameData>) -> String {
     let end = member.name.iter().position(|&b| b == 0).unwrap_or(member.name.len());
-    let s = String::from_utf8_lossy(&member.name[..end]).into_owned();
-    if s.is_empty() {
-        "(unnamed)".to_owned()
-    } else {
-        s
+    let s = String::from_utf8_lossy(&member.name[..end]).trim().to_owned();
+    if !s.is_empty() {
+        return s;
     }
+    if let (Some(gd), Some(cre)) = (gd, member.cre.as_ref()) {
+        if let Some(name) = gd.tlk_string(cre.name_strref) {
+            return name;
+        }
+    }
+    "(unnamed)".to_owned()
 }
 
 fn drag_u8(ui: &mut Ui, label: &str, value: &mut u8, range: std::ops::RangeInclusive<u8>, dirty: &mut bool) {

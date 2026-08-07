@@ -1,12 +1,26 @@
 //! Tiny persisted config (last-used save folder and game install folder)
 //! so the user doesn't have to re-pick them every launch. Stored as a
-//! `key=value` text file next to the executable.
-
+//! `key=value` text file under the user's per-user app-data folder
+//! (`%APPDATA%\bg2-editor\bg2-editor.cfg` on Windows) — deliberately NOT
+//! next to the executable, since that path differs between `cargo run`
+//! (a `target\debug\...` exe) and a manually-run release build, which
+//! would silently split settings across two different config files
+//! depending on how the app happens to be launched.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+fn config_dir() -> Option<PathBuf> {
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return Some(PathBuf::from(appdata).join("bg2-editor"));
+    }
+    // Fallback for non-Windows/unusual environments.
+    std::env::current_exe().ok()?.parent().map(|d| d.to_path_buf())
+}
+
 fn config_path() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(|d| d.join("bg2-editor.cfg"))
+    let dir = config_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("bg2-editor.cfg"))
 }
 
 fn load_map() -> HashMap<String, String> {

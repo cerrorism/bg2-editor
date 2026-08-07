@@ -40,13 +40,24 @@ pub struct GameData {
 impl GameData {
     /// Loads `chitin.key` and `dialog.tlk` from a game install root (the
     /// folder directly containing `chitin.key`, e.g.
-    /// `.../Baldur's Gate II - Enhanced Edition`). Everything else
-    /// (`.bif` archives, `.IDS` tables) is loaded lazily on first use.
+    /// `.../Baldur's Gate II - Enhanced Edition`), preferring `en_US` for
+    /// text. Everything else (`.bif` archives, `.IDS` tables) is loaded
+    /// lazily on first use. Prefer `load_with_locale` when the active
+    /// in-game language is known — otherwise names may resolve in the
+    /// wrong language (e.g. English instead of the game's actual
+    /// Chinese/etc. text), which is still the right *character*, just
+    /// not what the player actually sees on screen.
     pub fn load(root: &Path) -> Result<GameData, String> {
+        Self::load_with_locale(root, None)
+    }
+
+    /// Same as `load`, but tries `preferred_locale` (e.g. `"zh_CN"`)
+    /// before falling back to `en_US` / whatever's available.
+    pub fn load_with_locale(root: &Path, preferred_locale: Option<&str>) -> Result<GameData, String> {
         let key_bytes = fs::read(root.join("chitin.key")).map_err(|e| format!("read chitin.key: {e}"))?;
         let key = KeyFile::parse(&key_bytes)?;
 
-        let tlk_path = find_tlk_path(root)?;
+        let tlk_path = find_tlk_path(root, preferred_locale)?;
         let tlk_bytes = fs::read(&tlk_path).map_err(|e| format!("read {}: {e}", tlk_path.display()))?;
         let tlk = TlkFile::parse(&tlk_bytes)?;
 
@@ -75,6 +86,15 @@ impl GameData {
         }
         let archive = archives.get_mut(&bif_idx)?;
         archive.read_resource(sub_idx as usize).ok()
+    }
+
+    /// Resolves a raw dialog.tlk string reference directly — e.g. a CRE's
+    /// `name_strref` field (recruited companions typically have their
+    /// display name here rather than in the GAM party record's literal
+    /// name field, which is usually only populated for player-customized
+    /// characters).
+    pub fn tlk_string(&self, strref: i32) -> Option<String> {
+        self.tlk.get(strref).filter(|s| !s.is_empty()).map(|s| s.to_string())
     }
 
     /// Display name for an item resref: identified name if present, else
@@ -179,8 +199,14 @@ impl GameData {
     }
 }
 
-fn find_tlk_path(root: &Path) -> Result<PathBuf, String> {
+fn find_tlk_path(root: &Path, preferred_locale: Option<&str>) -> Result<PathBuf, String> {
     let lang_dir = root.join("lang");
+    if let Some(locale) = preferred_locale {
+        let p = lang_dir.join(locale).join("dialog.tlk");
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
     let preferred = ["en_US", "en_us", "en_GB"];
     for lang in preferred {
         let p = lang_dir.join(lang).join("dialog.tlk");

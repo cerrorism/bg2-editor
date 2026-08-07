@@ -56,6 +56,37 @@ fn dirs_documents_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+/// Detects the game's currently-active text language (e.g. `"zh_CN"`)
+/// from `Baldur.lua` in the Documents-folder game-data directory (the
+/// parent of `save_folder`'s root, i.e.
+/// `.../Baldur's Gate - Enhanced Edition/Baldur.lua`, containing a line
+/// like `SetPrivateProfileString('Language','Text','zh_CN')`). Used to
+/// pick the matching `dialog.tlk` locale so resolved names match what
+/// the player actually sees in-game, rather than always English.
+pub fn detect_active_language(save_root: &Path) -> Option<String> {
+    let docs_game_dir = save_root.parent()?;
+    let lua_path = find_case_insensitive(docs_game_dir, "Baldur.lua")?;
+    let text = fs::read_to_string(lua_path).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("SetPrivateProfileString('Language','Text','") {
+            if let Some(end) = rest.find('\'') {
+                return Some(rest[..end].to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn find_case_insensitive(dir: &Path, name: &str) -> Option<PathBuf> {
+    let direct = dir.join(name);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let entries = fs::read_dir(dir).ok()?;
+    entries.flatten().map(|e| e.path()).find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(name)))
+}
+
 pub fn load(save_folder: &Path) -> Result<GamFile, String> {
     let gam_path = save_folder.join("baldur.gam");
     let buf = fs::read(&gam_path).map_err(|e| format!("failed to read {}: {e}", gam_path.display()))?;
