@@ -13,7 +13,11 @@ The on-disk formats (GAM save file, embedded CRE creature structure, KEY/BIF/TLK
 - Character portraits, and class/race/kit/item/spell names shown in the game's real localized text (not raw internal IDs), in whatever language your game is installed in.
 - Safe writes: an automatic `.bak` backup is made before every save.
 
-## Build
+## Download
+
+Grab the latest `bg2-editor.exe` from the [Releases](../../releases) page. Drop it anywhere and run it — no install needed. Requires Windows 10 / 11 x64.
+
+## Build from Source
 
 ```powershell
 cargo build --release
